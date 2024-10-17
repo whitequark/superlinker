@@ -1,0 +1,7 @@
+[package]
+name = "superlinker"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+elf = "0.7.4"
