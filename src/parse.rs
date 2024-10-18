@@ -111,7 +111,12 @@ pub fn parse_elf<E: EndianParse>(elf_data: &[u8], soname: Option<&str>) -> Resul
                     };
                     // Both `R_X86_64_GLOB_DAT` and `R_X86_64_JUMP_SLOT` relocations can be expressed in terms of
                     // the more general and less optimized `R_X86_64_64` relocation, which is what the emitter is using.
-                    if elf_rela.r_type == R_X86_64_GLOB_DAT {
+                    if elf_rela.r_type == R_X86_64_64 {
+                        RelocationTarget::Symbol {
+                            symbol: symbol.expect("R_X86_64_64 requires a symbol"),
+                            addend: elf_rela.r_addend
+                        }
+                    } else if elf_rela.r_type == R_X86_64_GLOB_DAT {
                         RelocationTarget::Symbol {
                             symbol: symbol.expect("R_X86_64_GLOB_DAT requires a symbol"),
                             addend: elf_rela.r_addend

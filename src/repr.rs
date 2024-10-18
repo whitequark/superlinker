@@ -92,6 +92,11 @@ impl Image {
         }
         for relocation in self.relocations.iter_mut() {
             relocation.offset += offset;
+            match relocation.target {
+                RelocationTarget::Symbol { .. } => (),
+                RelocationTarget::Base { ref mut addend } =>
+                    *addend += offset as i64,
+            }
         }
         self.entry += offset;
     }
@@ -125,12 +130,27 @@ impl Image {
                 (source_symbol @ Symbol { scope: SymbolScope::Global, .. },
                  Some(target_symbol @ &mut Symbol { scope: SymbolScope::Import, .. })) => {
                     eprintln!("merge_into: using global symbol {} to resolve import", &symbol_name);
-                    target_symbol.scope = SymbolScope::Global;
+                    target_symbol.scope = source_symbol.scope;
                     target_symbol.kind = source_symbol.kind;
                     target_symbol.value = source_symbol.value;
                 },
-                (_, _) if symbol_name == "_init" || symbol_name == "_fini" =>
-                    eprintln!("merge_into: ignoring special symbol {}", &symbol_name),
+                (source_symbol @ Symbol { scope: SymbolScope::Global, .. },
+                 Some(target_symbol @ &mut Symbol { scope: SymbolScope::Weak, value: 0, .. })) => {
+                    eprintln!("merge_into: using global symbol {} to resolve missing weak symbol", &symbol_name);
+                    target_symbol.scope = source_symbol.scope;
+                    target_symbol.kind = source_symbol.kind;
+                    target_symbol.value = source_symbol.value;
+                },
+                (source_symbol, Some(target_symbol @ &mut Symbol { .. })) if symbol_name == "_init" || symbol_name == "_fini" => {
+                    if self.image_name.as_deref() == Some("libc.so") {
+                        eprintln!("merge_into: forcing special symbol {} to come from libc", &symbol_name);
+                        target_symbol.scope = SymbolScope::Global;
+                        target_symbol.kind = source_symbol.kind;
+                        target_symbol.value = source_symbol.value;
+                    } else {
+                        eprintln!("merge_into: ignoring special symbol {}", &symbol_name)
+                    }
+                }
                 (source_symbol, Some(target_symbol)) if &source_symbol == target_symbol => (),
                 (source_symbol, Some(target_symbol)) => {
                     panic!("Cannot merge source symbol {:?} into target symbol {:?}",

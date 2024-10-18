@@ -77,6 +77,7 @@ pub fn emit_elf(image: &Image) -> object::write::Result<Vec<u8>> {
         + /* DT_REL(A) */1
         + /* DT_REL(A)SZ */1
         + /* DT_REL(A)ENT */1
+        + /* DT_NULL */1
         + /* DT_NULL */1;
     let obj_dynamic_offset = obj_writer.reserve_dynamic(dynamic_count);
     let obj_dynstr_offset = obj_writer.reserve_dynstr();
@@ -210,6 +211,7 @@ pub fn emit_elf(image: &Image) -> object::write::Result<Vec<u8>> {
         (class.rel_size(is_rela) * image.relocations.len()) as u64);
     obj_writer.write_dynamic(if is_rela { DT_RELAENT } else { DT_RELENT },
         class.rel_size(is_rela) as u64);
+    obj_writer.write_dynamic(DT_NULL, 0);
     obj_writer.write_dynamic(DT_NULL, 0);
     obj_writer.write_dynstr();
     obj_writer.write_null_dynamic_symbol();
