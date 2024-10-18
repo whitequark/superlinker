@@ -173,6 +173,8 @@ impl Image {
                     target_symbol_map.insert(symbol_name.clone(), target.symbols.len());
                     target.symbols.push(source_symbol);
                 }
+                (_source_symbol @ Symbol { scope: SymbolScope::Weak, value: 0, .. },
+                 Some(_target_symbol @ &mut Symbol { scope: SymbolScope::Weak, value: 0, .. })) => (),
                 (source_symbol @ Symbol { scope: SymbolScope::Global | SymbolScope::Weak, .. },
                  Some(target_symbol @ &mut Symbol { scope: SymbolScope::Import, .. })) => {
                     eprintln!("merge_into: using source symbol {:?} to resolve target import", &symbol_name);
@@ -180,9 +182,9 @@ impl Image {
                     target_symbol.kind = source_symbol.kind;
                     target_symbol.value = source_symbol.value;
                 },
-                (Symbol { scope: SymbolScope::Import, .. },
-                 Some(&mut Symbol { scope: SymbolScope::Global, .. })) => {
-                    eprintln!("merge_into: using target global symbol {:?} to resolve source import", &symbol_name);
+                (_source_symbol @ Symbol { scope: SymbolScope::Import, .. },
+                 Some(_target_symbol @ &mut Symbol { scope: SymbolScope::Global | SymbolScope::Weak, .. })) => {
+                    eprintln!("merge_into: using target symbol {:?} to resolve source import", &symbol_name);
                 },
                 (source_symbol @ Symbol { scope: SymbolScope::Global, .. },
                  Some(target_symbol @ &mut Symbol { scope: SymbolScope::Weak, value: 0, .. })) => {
