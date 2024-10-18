@@ -194,6 +194,32 @@ pub fn parse_elf<E: EndianParse>(elf_data: &[u8], soname: Option<&str>) -> Resul
     }).collect::<Vec<_>>();
     // TODO: DT_SONAME(s) must take priority
     let image_name = soname.map(|name| name.to_owned());
+    let interpreter = elf_segments.iter().find_map(|elf_segment| {
+        // If PT_INTERP exists, it specifies a path to the external interpreter.
+        if elf_segment.p_type == PT_INTERP {
+            let path = elf_file.segment_data(&elf_segment).ok()
+                .and_then(|data| String::from_utf8(data[..data.len() - 1].to_owned()).ok())
+                .expect("Invalid PT_INTERP path");
+            Some(Interpreter::External(path))
+        } else {
+            None
+        }
+    }).unwrap_or_else(|| {
+        if elf_file.ehdr.e_entry != 0 {
+            // If PT_INTERP does not exist (and this is an ET_DYN), but there is an entry point, then this object is its
+            // own interpreter. Record the values required to invoke it according to the ABI later.
+            Interpreter::Internal {
+                // Assume the PIE isn't prelinked to a weird address, which really shouldn't happen; it's a real pain
+                // to try and figure out exactly what the base is supposed to be, since it doesn't explicitly appear in
+                // any of the ELF structures.
+                base:  0,
+                entry: elf_file.ehdr.e_entry,
+            }
+        } else {
+            // Probably just a shared library.
+            Interpreter::Absent
+        }
+    });
     let entry = elf_file.ehdr.e_entry;
     Ok(Image {
         machine,
@@ -203,6 +229,7 @@ pub fn parse_elf<E: EndianParse>(elf_data: &[u8], soname: Option<&str>) -> Resul
         relocations,
         dependencies,
         image_name,
+        interpreter,
         entry,
     })
 }

@@ -59,6 +59,13 @@ pub struct Relocation {
 }
 
 #[derive(Debug, Clone)]
+pub enum Interpreter {
+    Absent,
+    External(String),
+    Internal { base: u64, entry: u64 },
+}
+
+#[derive(Debug, Clone)]
 pub struct Image {
     pub machine: u16, // ELF machine
     pub alignment: u64, // integer that is a power of 2
@@ -67,6 +74,7 @@ pub struct Image {
     pub relocations: Vec<Relocation>,
     pub dependencies: Vec<String>, // requests images by name
     pub image_name: Option<String>, // requested via dependencies
+    pub interpreter: Interpreter,
     pub entry: u64,
 }
 
@@ -98,6 +106,13 @@ impl Image {
                     *addend += offset as i64,
             }
         }
+        match self.interpreter {
+            Interpreter::Absent | Interpreter::External(_) => (),
+            Interpreter::Internal { ref mut base, ref mut entry } => {
+                *base += offset;
+                *entry += offset;
+            },
+        }
         self.entry += offset;
     }
 
@@ -105,6 +120,9 @@ impl Image {
         // Check that the two images can be merged.
         assert!(self.machine == target.machine);
         assert!(self.alignment == target.alignment);
+        eprintln!("merge_into: merging source image {} into target image {}",
+            self.image_name.as_deref().map(|name| format!("{:?}", name)).unwrap_or("<unnamed>".to_owned()),
+            target.image_name.as_deref().map(|name| format!("{:?}", name)).unwrap_or("<unnamed>".to_owned()));
         // Relocate this image to be fully above the target.
         let (_target_begin, target_end) = target.segment_bounds();
         eprintln!("merge_into: rebasing source image by +{:#x}", target_end);
@@ -124,31 +142,39 @@ impl Image {
             let target_symbol = target_symbol_map.get(&symbol_name).map(|index| &mut target.symbols[*index]);
             match (source_symbol, target_symbol) {
                 (source_symbol, None) => {
-                    eprintln!("merge_into: adding new symbol {}", &symbol_name);
+                    // eprintln!("merge_into: adding new symbol {}", &symbol_name);
                     target.symbols.push(source_symbol)
                 }
                 (source_symbol @ Symbol { scope: SymbolScope::Global, .. },
                  Some(target_symbol @ &mut Symbol { scope: SymbolScope::Import, .. })) => {
-                    eprintln!("merge_into: using global symbol {} to resolve import", &symbol_name);
+                    eprintln!("merge_into: using source global symbol {} to resolve target import", &symbol_name);
                     target_symbol.scope = source_symbol.scope;
                     target_symbol.kind = source_symbol.kind;
                     target_symbol.value = source_symbol.value;
+                },
+                (Symbol { scope: SymbolScope::Import, .. },
+                 Some(&mut Symbol { scope: SymbolScope::Global, .. })) => {
+                    eprintln!("merge_into: using target global symbol {} to resolve source import", &symbol_name);
                 },
                 (source_symbol @ Symbol { scope: SymbolScope::Global, .. },
                  Some(target_symbol @ &mut Symbol { scope: SymbolScope::Weak, value: 0, .. })) => {
-                    eprintln!("merge_into: using global symbol {} to resolve missing weak symbol", &symbol_name);
+                    eprintln!("merge_into: using source global symbol {} to resolve target missing weak symbol", &symbol_name);
                     target_symbol.scope = source_symbol.scope;
                     target_symbol.kind = source_symbol.kind;
                     target_symbol.value = source_symbol.value;
                 },
+                (Symbol { scope: SymbolScope::Weak, value: 0, .. },
+                 Some(&mut Symbol { scope: SymbolScope::Global, .. })) => {
+                    eprintln!("merge_into: using target global symbol {} to resolve source missing weak symbol", &symbol_name);
+                },
                 (source_symbol, Some(target_symbol @ &mut Symbol { .. })) if symbol_name == "_init" || symbol_name == "_fini" => {
                     if self.image_name.as_deref() == Some("libc.so") {
-                        eprintln!("merge_into: forcing special symbol {} to come from libc", &symbol_name);
+                        eprintln!("merge_into: forcing target special symbol {} to come from libc", &symbol_name);
                         target_symbol.scope = SymbolScope::Global;
                         target_symbol.kind = source_symbol.kind;
                         target_symbol.value = source_symbol.value;
                     } else {
-                        eprintln!("merge_into: ignoring special symbol {}", &symbol_name)
+                        eprintln!("merge_into: ignoring source special symbol {}", &symbol_name)
                     }
                 }
                 (source_symbol, Some(target_symbol)) if &source_symbol == target_symbol => (),
@@ -166,6 +192,7 @@ impl Image {
             target_dependency_set.insert(target_dependency.clone());
         }
         for source_dependency in self.dependencies.into_iter() {
+            if Some(&source_dependency) == target.image_name.as_ref() { continue }
             if target_dependency_set.insert(source_dependency.clone()) {
                 eprintln!("merge_into: adding new dependency {:?}", source_dependency);
             }
@@ -176,5 +203,20 @@ impl Image {
             }
         }
         target.dependencies = target_dependency_set.into_iter().collect::<Vec<_>>();
+        // Merge the interpreters.
+        match (&self.interpreter, &mut target.interpreter) {
+            (Interpreter::Absent, Interpreter::Absent) |
+            (Interpreter::Absent, Interpreter::External(..)) => (),
+            (Interpreter::External(ref source_path),
+             Interpreter::External(ref target_path)) if source_path == target_path => (),
+            (source_interpreter @ Interpreter::Internal { .. },
+             target_interpreter @ Interpreter::External(_)) => {
+                eprintln!("merge_into: embedding the source image into target object as its interpreter");
+                *target_interpreter = source_interpreter.clone();
+            }
+            (source_interpreter, target_interpreter) =>
+                panic!("Cannot merge source object with interpreter {:?} into target object with interpreter {:?}",
+                    source_interpreter, target_interpreter)
+        }
     }
 }

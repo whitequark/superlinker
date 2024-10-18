@@ -14,21 +14,22 @@ fn make_executable<P: AsRef<std::path::Path>>(path: P) -> std::io::Result<()> {
 }
 
 fn main() {
-    let output_filename = std::path::PathBuf::from(std::env::args().nth(1).expect("Usage: $0 <output.elf> <input.elf>"));
-    let input_filename = std::path::PathBuf::from(std::env::args().nth(2).expect("Usage: $0 <output.elf> <input.elf>"));
-    let input_filename2 = std::path::PathBuf::from(std::env::args().nth(3).expect("Usage: $0 <output.elf> <input.elf>"));
+    let output_filename = std::path::PathBuf::from(std::env::args().nth(1).expect("Usage: $0 <output.elf> <input.elf> <merge.elf>..."));
+    let input_filename = std::path::PathBuf::from(std::env::args().nth(2).expect("Usage: $0 <output.elf> <input.elf> <merge.elf>..."));
+    let merge_filenames = std::env::args().skip(3).map(|arg| std::path::PathBuf::from(arg));
 
     let input_data = std::fs::read(&input_filename).expect("Could not read input file");
     let input_soname = input_filename.file_name().and_then(|name| name.to_str());
-    let mut image = parse::parse_elf::<AnyEndian>(&input_data[..], input_soname).expect("Could not parse input file");
+    let mut input_image = parse::parse_elf::<AnyEndian>(&input_data[..], input_soname).expect("Could not parse input file");
 
-    let input_data2 = std::fs::read(&input_filename2).expect("Could not read input file 2");
-    let input_soname2 = input_filename2.file_name().and_then(|name| name.to_str());
-    let image2 = parse::parse_elf::<AnyEndian>(&input_data2[..], input_soname2).expect("Could not parse input file 2");
+    for merge_filename in merge_filenames {
+        let merge_data = std::fs::read(&merge_filename).expect("Could not read merge file");
+        let merge_soname = merge_filename.file_name().and_then(|name| name.to_str());
+        let merge_image = parse::parse_elf::<AnyEndian>(&merge_data[..], merge_soname).expect("Could not parse merge file");
+        merge_image.merge_into(&mut input_image);
+    }
 
-    image2.merge_into(&mut image);
-
-    let new_file_data = emit::emit_elf(&image).expect("Could not emit output file");
-    std::fs::write(&output_filename, new_file_data).expect("Could not write output file");
+    let output_data = emit::emit_elf(&input_image).expect("Could not emit output file");
+    std::fs::write(&output_filename, output_data).expect("Could not write output file");
     make_executable(&output_filename).expect("Could not make output file executable");
 }

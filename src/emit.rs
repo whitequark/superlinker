@@ -1,4 +1,4 @@
-use object::elf::*;
+use object::{elf::*, Endianness};
 use object::write::elf::{Class, FileHeader, ProgramHeader, Rel, SectionHeader, Sym, Writer};
 
 use crate::repr::*;
@@ -7,7 +7,57 @@ fn make_static_str(s: impl AsRef<str>) -> &'static str {
     s.as_ref().to_owned().leak()
 }
 
+fn make_stub(machine: u16, base: u64, interp_base: u64, interp_entry: u64, user_entry: u64) -> Vec<u8> {
+    // When the interpreter is loaded by the kernel, the kernel communicates several key parameters to it through
+    // the auxiliary vector; most importantly, AT_BASE, AT_ENTRY, and AT_PH*. For the dynamic loader to function,
+    // AT_BASE must be set to its own ELF header (to which it maintains an internal PC-relative reference).
+    // For the dynamic loader to jump to the executable after loading, AT_ENTRY must be set to the user entry point
+    // (`e_entry` of the PIE). For the dynamic loader to relocate the executable, AT_PH* must be pointing to the user
+    // executable's entry point.
+    //
+    // All of these parameters are configured by the kernel when it's launching an interpreter via the PT_INTERP
+    // mechanism. However, if we link the interpreter in, the kernel will instead point these parameters to our
+    // combined executable. Luckily, AT_PH* already have the right values, so the only modifications needed are
+    // to AT_BASE (which *must* point to the `\x7FELF` of the interpreter) and AT_ENTRY (which must point to
+    // the PIE entry point). Since we interpose this stub using the `e_entry` file header field, we must restore
+    // the original `e_entry` by modifying `AT_ENTRY`.
+    if machine == EM_X86_64 {
+        let i1 =  interp_base as i64 - (base as i64 + 46);
+        let i2 =   user_entry as i64 - (base as i64 + 55);
+        let i3 = interp_entry as i64 - (base as i64 + 74);
+        vec![
+            0x48, 0x89, 0xe7,
+            0x48, 0x8b, 0x3f,
+            0x48, 0x8d, 0x7c, 0xfc, 0x08,
+            0x48, 0x83, 0xc7, 0x08,
+            0x48, 0x83, 0x3f, 0x00,
+            0x75, 0xf6,
+            0x48, 0x83, 0xc7, 0x08,
+            0x48, 0x83, 0x3f, 0x07, 0x74, 0x08, // AT_BASE  = 0x7
+            0x48, 0x83, 0x3f, 0x09, 0x74, 0x0b, // AT_ENTRY = 0x9
+            0xeb, 0x14,
+            0x48, 0x8d, 0x35, (i1&0xff) as u8, (i1>>8) as u8, (i1>>16) as u8, (i1>>24) as u8,
+            0xeb, 0x07,
+            0x48, 0x8d, 0x35, (i2&0xff) as u8, (i2>>8) as u8, (i2>>16) as u8, (i2>>24) as u8,
+            0x48, 0x89, 0x77, 0x08,
+            0x48, 0x83, 0xc7, 0x10,
+            0x48, 0x83, 0x3f, 0x00,
+            0x75, 0xd4,
+            0xe9, (i3&0xff) as u8, (i3>>8) as u8, (i3>>16) as u8, (i3>>24) as u8,
+        ]
+    } else {
+        panic!("Stub not implemented for machine: {:?}", machine)
+    }
+}
+
 pub fn emit_elf(image: &Image) -> object::write::Result<Vec<u8>> {
+    #[derive(Debug)]
+    enum InterpreterOut {
+        Path { bytes: Vec<u8> },
+        Stub { base: u64, entry: u64, code_len: usize },
+        None,
+    }
+
     #[derive(Debug)]
     struct LoadSectionOut {
         index: object::write::elf::SectionIndex,
@@ -26,32 +76,56 @@ pub fn emit_elf(image: &Image) -> object::write::Result<Vec<u8>> {
         hash: u32,
     }
 
-    let (class, is_rela, interp);
+    let (endian, class, is_rela);
     if image.machine == object::elf::EM_X86_64 {
+        endian  = Endianness::Little;
         class   = Class { is_64: true };
         is_rela = true;
-        interp  = c"/lib/ld-musl-x86_64.so.1";
     } else {
         panic!("Unhandled machine: {}", image.machine)
     }
 
+    let out_interp = match image.interpreter {
+        Interpreter::External(ref path) => {
+            let mut bytes = path.as_bytes().to_vec();
+            bytes.push(0);
+            InterpreterOut::Path { bytes }
+        }
+        Interpreter::Internal { base, entry } => {
+            let code = make_stub(image.machine, 0, 0, 0, 0); // can't resolve references yet
+            InterpreterOut::Stub { base, entry, code_len: code.len() }
+        },
+        Interpreter::Absent =>
+            InterpreterOut::None
+    };
+
     let mut elf_data = Vec::new();
-    let mut obj_writer = Writer::new(object::Endianness::Little, class.is_64, &mut elf_data);
+    let mut obj_writer = Writer::new(endian, class.is_64, &mut elf_data);
 
     // Reserve space for file and program headers.
     // These are the things the dynamic linker cares about.
     obj_writer.reserve_file_header();
     let obj_phdr_offset = obj_writer.reserved_len();
+    let interp_phdr_count = match &out_interp {
+        InterpreterOut::Path { .. } => /* PT_INTERP */1,
+        InterpreterOut::Stub { .. } => /* PT_LOAD */1,
+        InterpreterOut::None => 0,
+    };
     let phdr_count =
         /* PT_PHDR */1
-        + /* PT_INTERP */1
+        + /* PT_INTERP or PT_LOAD for interpreter thunk */interp_phdr_count
         + /* PT_LOAD for ELF file and program headers */1
         + /* PT_LOAD for PT_DYNAMIC, etc */1
         + /* PT_DYNAMIC */1
         + /* PT_LOAD[..] */image.segments.len();
     obj_writer.reserve_program_headers(phdr_count as u32);
-    let obj_interp_offset = obj_writer.reserve(interp.to_bytes_with_nul().len(), 1);
+    let obj_interp_offset = if let InterpreterOut::Path { bytes } = &out_interp {
+        obj_writer.reserve(bytes.len(), 1)
+    } else { 0 };
     let obj_headers_end = obj_writer.reserved_len();
+    let obj_stub_offset = if let InterpreterOut::Stub { code_len, .. } = out_interp {
+        obj_writer.reserve(code_len, image.alignment as usize)
+    } else { 0 };
 
     // Reserve space for dynamic linker information.
     // This is the stuff the dynamic linker *really* cares about.
@@ -138,12 +212,17 @@ pub fn emit_elf(image: &Image) -> object::write::Result<Vec<u8>> {
     }
 
     // Write file and program headers.
+    let entry = match &out_interp {
+        InterpreterOut::Path { .. } => image_file_offset as u64 + image.entry,
+        InterpreterOut::Stub { .. } => obj_stub_offset as u64,
+        InterpreterOut::None => 0,
+    };
     obj_writer.write_file_header(&FileHeader {
         os_abi: 0,
         abi_version: 0,
         e_type: ET_DYN,
         e_machine: image.machine,
-        e_entry: image_file_offset as u64 + image.entry,
+        e_entry: entry,
         e_flags: 0,
     })?;
     // We use a 1:1 mapping between file offsets and virtual addresses (before rebasing). This is already how many
@@ -166,9 +245,17 @@ pub fn emit_elf(image: &Image) -> object::write::Result<Vec<u8>> {
     // and runs its entry point instead of the application's.
     write_program_header(PT_PHDR, PF_R,
         obj_phdr_offset, class.program_header_size() * phdr_count, class.align() as u64);
-    // Kernel uses PT_INTERP to find out which interpreter to load.
-    write_program_header(PT_INTERP, PF_R,
-        obj_interp_offset, interp.to_bytes_with_nul().len(), /*align=*/1);
+    match &out_interp {
+        InterpreterOut::Path { bytes } =>
+            // Kernel uses PT_INTERP to find out which interpreter to load.
+            write_program_header(PT_INTERP, PF_R,
+                obj_interp_offset, bytes.len(), /*align=*/1),
+        InterpreterOut::Stub { code_len, .. } =>
+            // Stub uses kernel ABI to bootstrap the built-in interpreter.
+            write_program_header(PT_LOAD, PF_R | PF_X,
+                obj_stub_offset, *code_len, /*align=*/image.alignment),
+        InterpreterOut::None => ()
+    }
     // The ELF program headers must be loaded in order for the interpreter to be able to parse the file. Although
     // it is not required by the ABI to load the file headers, it's easier to do that anyway. (Most Linux binaries
     // do load them.)
@@ -195,7 +282,22 @@ pub fn emit_elf(image: &Image) -> object::write::Result<Vec<u8>> {
     }
 
     // Write dynamic linker information.
-    obj_writer.write(interp.to_bytes_with_nul());
+    match &out_interp {
+        InterpreterOut::Path { bytes } => {
+            obj_writer.pad_until(obj_interp_offset);
+            obj_writer.write(&bytes);
+        }
+        InterpreterOut::Stub { base: interp_base, entry: interp_entry, code_len } => {
+            let code = make_stub(image.machine, obj_stub_offset as u64,
+                image_file_offset as u64 + *interp_base,
+                image_file_offset as u64 + *interp_entry,
+                image_file_offset as u64 + image.entry);
+            assert_eq!(code.len(), *code_len);
+            obj_writer.pad_until(obj_stub_offset);
+            obj_writer.write(&code);
+        }
+        InterpreterOut::None => (),
+    }
     obj_writer.pad_until(obj_dynamic_offset);
     for out_needed in out_needful {
         obj_writer.write_dynamic_string(DT_NEEDED, out_needed); // do the needful
