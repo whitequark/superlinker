@@ -356,21 +356,32 @@ pub fn emit_elf(image: &Image) -> object::write::Result<Vec<u8>> {
         Some(out_dynsyms.get(index.checked_sub(hash_index_base)? as usize)?.hash)
     });
     obj_writer.write_align_relocation();
+    let find_symbol = |name|
+        image.symbols.iter().position(|symbol| symbol.name == name).map(|index| index + 1).unwrap_or(0) as u32;
     for relocation in image.relocations.iter() {
-        let (obj_sym, obj_symtype, obj_addend);
+        let (obj_reltype, obj_relsym, obj_addend);
         if image.machine == object::elf::EM_X86_64 {
             match relocation.target.clone() {
                 RelocationTarget::Symbol { symbol: symbol_name, addend } => {
-                    obj_sym = image.symbols.iter().position(|symbol|
-                        symbol.name == symbol_name).map(|index| index + 1).unwrap_or(0) as u32;
-                    obj_symtype = R_X86_64_64;
+                    obj_reltype = R_X86_64_64;
+                    obj_relsym = find_symbol(symbol_name);
                     obj_addend = addend;
                 },
                 RelocationTarget::Base { addend } => {
-                    obj_sym = 0;
-                    obj_symtype = R_X86_64_RELATIVE;
+                    obj_reltype = R_X86_64_RELATIVE;
+                    obj_relsym = 0;
                     obj_addend = image_file_offset as i64 + addend;
                 },
+                RelocationTarget::Copy { symbol: symbol_name } => {
+                    obj_reltype = R_X86_64_COPY;
+                    obj_relsym = find_symbol(symbol_name);
+                    obj_addend = 0;
+                },
+                RelocationTarget::None => {
+                    obj_reltype = R_X86_64_NONE;
+                    obj_relsym = 0;
+                    obj_addend = 0;
+                }
             }
         } else {
             unreachable!()
@@ -378,8 +389,8 @@ pub fn emit_elf(image: &Image) -> object::write::Result<Vec<u8>> {
         obj_writer.write_relocation(is_rela, &Rel {
             // In executables and shared libraries, relocations are applied at a virtual address.
             r_offset: image_file_offset as u64 + relocation.offset,
-            r_sym: obj_sym,
-            r_type: obj_symtype,
+            r_sym: obj_relsym,
+            r_type: obj_reltype,
             r_addend: obj_addend,
         });
     }

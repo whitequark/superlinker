@@ -49,6 +49,10 @@ pub enum RelocationTarget {
     // R_X86_64_RELATIVE
     // = B + A
     Base { addend: i64 },
+    // R_X86_64_COPY
+    Copy { symbol: String },
+    // R_X86_64_NONE
+    None,
     // ... to be continued?
 }
 
@@ -101,9 +105,11 @@ impl Image {
         for relocation in self.relocations.iter_mut() {
             relocation.offset += offset;
             match relocation.target {
-                RelocationTarget::Symbol { .. } => (),
                 RelocationTarget::Base { ref mut addend } =>
                     *addend += offset as i64,
+                RelocationTarget::Symbol { .. } |
+                RelocationTarget::Copy { .. } |
+                RelocationTarget::None => ()
             }
         }
         match self.interpreter {
@@ -152,56 +158,105 @@ impl Image {
         let mut target_symbol_map = HashMap::new();
         for (symbol_index, symbol) in target.symbols.iter().enumerate() {
             if target_symbol_map.insert(symbol.name.clone(), symbol_index).is_some() {
-                panic!("Duplicate symbol {} in target image", symbol.name.as_str());
+                panic!("Duplicate symbol {:?} in target image", symbol.name.as_str());
             }
         }
         // Merge symbols.
+        let mut apply_copy_relocs_later = Vec::new();
         for source_symbol in self.symbols.into_iter() {
             let symbol_name = source_symbol.name.to_owned();
             let target_symbol = target_symbol_map.get(&symbol_name).map(|index| &mut target.symbols[*index]);
             match (source_symbol, target_symbol) {
                 (source_symbol, None) => {
-                    // eprintln!("merge_into: adding new symbol {}", &symbol_name);
-                    target.symbols.push(source_symbol)
+                    // eprintln!("merge_into: adding new symbol {:?}", &symbol_name);
+                    target_symbol_map.insert(symbol_name.clone(), target.symbols.len());
+                    target.symbols.push(source_symbol);
                 }
                 (source_symbol @ Symbol { scope: SymbolScope::Global, .. },
                  Some(target_symbol @ &mut Symbol { scope: SymbolScope::Import, .. })) => {
-                    eprintln!("merge_into: using source global symbol {} to resolve target import", &symbol_name);
+                    eprintln!("merge_into: using source global symbol {:?} to resolve target import", &symbol_name);
                     target_symbol.scope = source_symbol.scope;
                     target_symbol.kind = source_symbol.kind;
                     target_symbol.value = source_symbol.value;
                 },
                 (Symbol { scope: SymbolScope::Import, .. },
                  Some(&mut Symbol { scope: SymbolScope::Global, .. })) => {
-                    eprintln!("merge_into: using target global symbol {} to resolve source import", &symbol_name);
+                    eprintln!("merge_into: using target global symbol {:?} to resolve source import", &symbol_name);
                 },
                 (source_symbol @ Symbol { scope: SymbolScope::Global, .. },
                  Some(target_symbol @ &mut Symbol { scope: SymbolScope::Weak, value: 0, .. })) => {
-                    eprintln!("merge_into: using source global symbol {} to resolve target missing weak symbol", &symbol_name);
+                    eprintln!("merge_into: using source global symbol {:?} to resolve target missing weak symbol", &symbol_name);
                     target_symbol.scope = source_symbol.scope;
                     target_symbol.kind = source_symbol.kind;
                     target_symbol.value = source_symbol.value;
                 },
                 (Symbol { scope: SymbolScope::Weak, value: 0, .. },
                  Some(&mut Symbol { scope: SymbolScope::Global, .. })) => {
-                    eprintln!("merge_into: using target global symbol {} to resolve source missing weak symbol", &symbol_name);
+                    eprintln!("merge_into: using target global symbol {:?} to resolve source missing weak symbol", &symbol_name);
                 },
-                (source_symbol, Some(target_symbol @ &mut Symbol { .. })) if symbol_name == "_init" || symbol_name == "_fini" => {
+                (source_symbol, Some(target_symbol @ &mut Symbol { .. }))
+                        if symbol_name == "_init" || symbol_name == "_fini" => {
                     if self.image_name.as_deref() == Some("libc.so") {
-                        eprintln!("merge_into: forcing target special symbol {} to come from libc", &symbol_name);
+                        eprintln!("merge_into: forcing target special symbol {:?} to come from libc", &symbol_name);
                         target_symbol.scope = SymbolScope::Global;
                         target_symbol.kind = source_symbol.kind;
                         target_symbol.value = source_symbol.value;
                     } else {
-                        eprintln!("merge_into: ignoring source special symbol {}", &symbol_name)
+                        eprintln!("merge_into: ignoring source special symbol {:?}", &symbol_name)
                     }
                 }
+                (source_symbol @ Symbol { scope: SymbolScope::Global, kind: SymbolKind::Data, .. },
+                 Some(target_symbol @ &mut Symbol { scope: SymbolScope::Global, kind: SymbolKind::Data, .. }))
+                        if source_symbol.size == target_symbol.size => {
+                    eprintln!("merge_into: replacing source global data symbol {} with the same target global data symbol", &symbol_name);
+                    for (reloc_index, reloc) in target.relocations.iter().enumerate() {
+                        if let Relocation { target: RelocationTarget::Copy { symbol: copy_symbol_name }, .. } = &reloc {
+                            if symbol_name == *copy_symbol_name {
+                                apply_copy_relocs_later.push((reloc_index, source_symbol.clone()));
+                            }
+                        }
+                    }
+                },
                 (source_symbol, Some(target_symbol)) if &source_symbol == target_symbol => (),
                 (source_symbol, Some(target_symbol)) => {
                     panic!("Cannot merge source symbol {:?} into target symbol {:?}",
                         source_symbol, target_symbol)
                 }
             }
+        }
+        // Apply copy relocations, if any were triggered.
+        for (reloc_index, source_symbol) in apply_copy_relocs_later.into_iter() {
+            let target_reloc = &mut target.relocations[reloc_index];
+            eprintln!("merge_into: applying copy relocation for symbol {:?}: copying {:#x}{:+#x} => {:#x}",
+                &source_symbol.name, source_symbol.value, source_symbol.size, target_reloc.offset);
+            let source_data = target.segments.iter().find_map(|segment| {
+                if source_symbol.value >= segment.addr &&
+                        source_symbol.value + source_symbol.size <= segment.addr + segment.size {
+                    let range_begin = (source_symbol.value - segment.addr) as usize;
+                    let range_end = (source_symbol.value - segment.addr + source_symbol.size) as usize;
+                    if let Some(data) = segment.data.get(range_begin..range_end) {
+                        Some(data.to_owned())
+                    } else {
+                        Some(vec![0; source_symbol.size as usize])
+                    }
+                } else {
+                    None
+                }
+            }).expect("Failed to find source segment for copy relocation");
+            for segment in target.segments.iter_mut() {
+                if target_reloc.offset >= segment.addr &&
+                        target_reloc.offset + source_symbol.size <= segment.addr + segment.size {
+                    let range_begin = (target_reloc.offset - segment.addr) as usize;
+                    let range_end = (target_reloc.offset - segment.addr + source_symbol.size) as usize;
+                    if segment.data.len() < range_end {
+                        segment.data.resize(range_end, 0);
+                    }
+                    segment.data.get_mut(range_begin..range_end)
+                        .expect("Failed to slice target data for copy relocation")
+                        .copy_from_slice(&source_data);
+                }
+            }
+            target_reloc.target = RelocationTarget::None;
         }
         // Merge relocations. Relocations can never be removed, even if they refer to the self.
         target.relocations.append(&mut self.relocations);

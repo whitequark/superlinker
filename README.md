@@ -85,8 +85,6 @@ Although the core approach is sound, this implementation has flaws, most of whic
 - All GOT and PLT optimizations are disabled. (This means that `DT_JMPREL`, `DT_PLTREL`, and `DT_PLTRELSZ` entries are stripped.)
     - PLT optimizations at least could be added back with additional work.
 - Only the `global-dynamic` TLS model is supported.
-- Only a subset of relocations is implemented even for `amd64`.
-    - In particular, symbols with "common" linkage will fail to link if they are initialized.
 - Only "Rela" relocations are implemented and tested, though "Rel" relocations would be trivial to add.
 - The kernel ABI emulation stub is unpleasantly large and difficult to modify.
 - `DT_GNU_HASH` is not supported, and the number of `DT_HASH` buckets is randomly fixed at 4.
