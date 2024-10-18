@@ -173,9 +173,9 @@ impl Image {
                     target_symbol_map.insert(symbol_name.clone(), target.symbols.len());
                     target.symbols.push(source_symbol);
                 }
-                (source_symbol @ Symbol { scope: SymbolScope::Global, .. },
+                (source_symbol @ Symbol { scope: SymbolScope::Global | SymbolScope::Weak, .. },
                  Some(target_symbol @ &mut Symbol { scope: SymbolScope::Import, .. })) => {
-                    eprintln!("merge_into: using source global symbol {:?} to resolve target import", &symbol_name);
+                    eprintln!("merge_into: using source symbol {:?} to resolve target import", &symbol_name);
                     target_symbol.scope = source_symbol.scope;
                     target_symbol.kind = source_symbol.kind;
                     target_symbol.value = source_symbol.value;
@@ -209,7 +209,7 @@ impl Image {
                 (source_symbol @ Symbol { scope: SymbolScope::Global, kind: SymbolKind::Data, .. },
                  Some(target_symbol @ &mut Symbol { scope: SymbolScope::Global, kind: SymbolKind::Data, .. }))
                         if source_symbol.size == target_symbol.size => {
-                    eprintln!("merge_into: replacing source global data symbol {} with the same target global data symbol", &symbol_name);
+                    eprintln!("merge_into: replacing source global data symbol {:?} with the same target global data symbol", &symbol_name);
                     for (reloc_index, reloc) in target.relocations.iter().enumerate() {
                         if let Relocation { target: RelocationTarget::Copy { symbol: copy_symbol_name }, .. } = &reloc {
                             if symbol_name == *copy_symbol_name {
