@@ -60,9 +60,36 @@ pub struct Relocation {
 pub struct Image {
     pub machine: u16, // ELF machine
     pub alignment: u64, // integer that is a power of 2
-    pub segments: Vec<LoadSegment>,
+    pub segments: Vec<LoadSegment>, // sorted in ascending order
     pub symbols: Vec<Symbol>,
     pub needed: Vec<String>,
     pub relocations: Vec<Relocation>,
     pub entry: u64,
+}
+
+impl Image {
+    pub fn segment_bounds(&self) -> (u64, u64) {
+        match (self.segments.first(), self.segments.last()) {
+            (Some(first), Some(last)) =>
+                (first.addr, ((last.addr + last.size - 1) | (self.alignment - 1)) + 1),
+            _ => (0, 0)
+        }
+    }
+
+    pub fn rebase(&mut self, offset: u64) {
+        assert!(offset % self.alignment == 0, "Rebase offset must be aligned");
+        for segment in self.segments.iter_mut() {
+            segment.addr += offset;
+        }
+        for symbol in self.symbols.iter_mut() {
+            // The intermediate representation currently doesn't include absolute symbols.
+            if symbol.value != 0 {
+                symbol.value += offset;
+            }
+        }
+        for relocation in self.relocations.iter_mut() {
+            relocation.offset += offset;
+        }
+        self.entry += offset;
+    }
 }

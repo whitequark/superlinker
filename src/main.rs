@@ -19,7 +19,9 @@ fn main() {
 
     let input_data = std::fs::read(&input_filename).expect("Could not read input file");
     // let file = ElfBytes::<NativeEndian>::minimal_parse(&input_data).expect("Could not parse ELF");
-    let image = parse::parse_elf::<AnyEndian>(&input_data[..]).expect("Could not parse input file");
+    let mut image = parse::parse_elf::<AnyEndian>(&input_data[..]).expect("Could not parse input file");
+
+    image.rebase(image.alignment * 5);
 
     let new_file_data = emit::emit_elf(&image).expect("Could not emit output file");
     std::fs::write(&output_filename, new_file_data).expect("Could not write output file");
