@@ -331,23 +331,29 @@ pub fn emit_elf(image: &Image) -> object::write::Result<Vec<u8>> {
         };
         // In symbol tables, relocations must be associated with a section, even in an executable or shared object
         // where the address of the section is unimportant. Nevertheless, find which section they belong to.
-        let (obj_value, obj_section);
-        if symbol.value == 0 {
+        let (obj_value, obj_section, obj_shndx);
+        if symbol.abs {
+            obj_value = symbol.value;
+            obj_section = None;
+            obj_shndx = SHN_ABS;
+        } else if symbol.value == 0 {
             obj_value = 0;
             obj_section = None;
+            obj_shndx = 0;
         } else {
             obj_value = image_file_offset as u64 + symbol.value;
             obj_section = out_load_sections.iter().find_map(|&LoadSectionOut { addr, size, index, .. }| {
                 // Neither `symbol` nor `out_load_sections` are relocated by `image_file_offset` here.
                 if symbol.value >= addr && symbol.value < addr + size { Some(index) } else { None }
-            })
+            });
+            obj_shndx = 0;
         };
         obj_writer.write_dynamic_symbol(&Sym {
             name: Some(obj_writer.get_dynamic_string(symbol.name.as_ref())),
             section: obj_section,
             st_info: (obj_bind << 4) | obj_symtype,
             st_other: 0,
-            st_shndx: 0, // automatically filled in if `section` is specified
+            st_shndx: obj_shndx, // automatically filled in if `section` is specified
             st_value: obj_value,
             st_size: symbol.size,
         });

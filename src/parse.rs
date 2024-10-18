@@ -82,11 +82,11 @@ pub fn parse_elf<E: EndianParse>(elf_data: &[u8], soname: Option<&str>) -> Resul
                     panic!("Unhandled symbol visibility: {}",
                         elf::to_str::st_bind_to_str(elf_symbol.st_bind()).unwrap_or("<unknown>"))
                 };
-                if elf_symbol.st_shndx == SHN_ABS || elf_symbol.st_shndx == SHN_COMMON {
-                    panic!("Unhandled special symbol");
+                if elf_symbol.st_shndx == SHN_COMMON {
+                    panic!("Unhandled special shndx {:#x}", elf_symbol.st_shndx);
                 }
                 let size = elf_symbol.st_size;
-                Some(Symbol { name, kind, scope, value, size })
+                Some(Symbol { name, kind, scope, value, size, abs: (elf_symbol.st_shndx == SHN_ABS) })
             } else {
                 None
             }

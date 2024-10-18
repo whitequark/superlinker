@@ -37,6 +37,7 @@ pub struct Symbol {
     pub scope: SymbolScope,
     pub value: u64,
     pub size: u64,
+    pub abs: bool,
 }
 
 #[derive(Debug, Clone)]
