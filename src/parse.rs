@@ -1,9 +1,13 @@
 use elf::abi::*;
 use elf::endian::EndianParse;
 use elf::relocation::RelaIterator;
+use elf::segment::ProgramHeader;
 use elf::ElfBytes;
 
 use crate::repr::*;
+
+pub const DT_RELR: i64 = 36;
+pub const DT_RELRSZ: i64 = 35;
 
 pub fn parse_elf<E: EndianParse>(elf_data: &[u8], soname: Option<&str>) -> Result<Image, elf::parse::ParseError> {
     let elf_file = ElfBytes::<E>::minimal_parse(elf_data)?;
@@ -161,6 +165,12 @@ pub fn parse_elf<E: EndianParse>(elf_data: &[u8], soname: Option<&str>) -> Resul
     let elf_dynamic_pltrelsz = elf_dynamic.iter().find_map(|elf_dyn| {
         if elf_dyn.d_tag == DT_PLTRELSZ { Some(elf_dyn.clone().d_val() as usize) } else { None }
     });
+    let elf_dynamic_relr = elf_dynamic.iter().find_map(|elf_dyn| {
+        if elf_dyn.d_tag == DT_RELR { Some(elf_dyn.clone().d_val() as usize) } else { None }
+    });
+    let elf_dynamic_relrsz = elf_dynamic.iter().find_map(|elf_dyn| {
+        if elf_dyn.d_tag == DT_RELRSZ { Some(elf_dyn.clone().d_val() as usize) } else { None }
+    });
     let mut data_relocations = match (elf_dynamic_rela, elf_dynamic_relasz) {
         (Some(elf_dynamic_rela), Some(elf_dynamic_relasz)) =>
             parse_elf_rela(&elf_data[elf_dynamic_rela..elf_dynamic_rela + elf_dynamic_relasz]),
@@ -182,9 +192,56 @@ pub fn parse_elf<E: EndianParse>(elf_data: &[u8], soname: Option<&str>) -> Resul
             }
         }
         (None, None, None) => Vec::new(),
-        _ => panic!("Expected dynamic table to have all or none of PT_PLTREL, PT_JMPREL and PT_PLTRELSZ")
+        _ => panic!("Expected dynamic table to have all or none of PT_PLTREL, PT_JMPREL, and PT_PLTRELSZ")
+    };
+    let mut relr_relocations = Vec::new();
+    match (elf_dynamic_relr, elf_dynamic_relrsz) {
+        (Some(elf_dynamic_relr), Some(elf_dynamic_relrsz)) => {
+            let parse = E::from_ei_data(elf_data[EI_DATA]).unwrap();
+            let mut segment_for_addend = None::<ProgramHeader>;
+            let mut get_addend = |addr| {
+                segment_for_addend = match segment_for_addend {
+                    Some(segment) if addr >= segment.p_vaddr && addr < segment.p_vaddr + segment.p_memsz =>
+                        segment_for_addend,
+                    _ => elf_segments.iter().find(|segment|
+                        addr >= segment.p_vaddr && addr < segment.p_vaddr + segment.p_memsz)
+                };
+                let mut file_offset = segment_for_addend
+                    .map(|segment| addr + segment.p_offset - segment.p_vaddr)
+                    .expect("Relr target outside of all segments") as usize;
+                parse.parse_i64_at(&mut file_offset, elf_data).unwrap()
+            };
+            let mut push_relr = |addr|
+                relr_relocations.push(Relocation {
+                    offset: addr,
+                    target: RelocationTarget::Base { addend: get_addend(addr) }
+                });
+            let elf_relr_data = &elf_data[elf_dynamic_relr..elf_dynamic_relr + elf_dynamic_relrsz];
+            let mut offset = 0;
+            let mut next_rel = 0;
+            while offset < elf_relr_data.len() {
+                let mut entry = parse.parse_u64_at(&mut offset, elf_relr_data).unwrap();
+                if (entry & 1) == 0 {
+                    push_relr(entry as u64);
+                    next_rel = entry + 8;
+                } else {
+                    let mut iter_rel = next_rel;
+                    while (entry & !1) != 0 {
+                        entry >>= 1;
+                        if entry & 1 == 1 {
+                            push_relr(iter_rel as u64);
+                        }
+                        iter_rel += 8;
+                    }
+                    next_rel = next_rel + 8 * 63;
+                }
+            }
+        }
+        (None, None) => (),
+        _ => panic!("Expected dynamic table to have all or none of DT_RELR and DT_RELRSZ")
     };
     let mut relocations = Vec::new();
+    relocations.append(&mut relr_relocations); // ABI suggests processing Relr first
     relocations.append(&mut data_relocations);
     relocations.append(&mut code_relocations);
     let dependencies = elf_dynamic.iter().filter_map(|elf_dyn| {
