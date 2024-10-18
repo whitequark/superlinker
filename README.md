@@ -99,6 +99,12 @@ Although the core approach is sound, this implementation has flaws, most of whic
 
 The implementation is less than a thousand lines long, written with portability in mind, and extensively commented, so it should not be too difficult to address most of these flaws. It should even run on Windows!
 
+## Past?
+
+If you've enjoyed Superlinker, you might also enjoy [unfork][].
+
+[unfork]: https://github.com/whitequark/unfork
+
 ## License?
 
 [0-clause BSD](LICENSE-0BSD.txt).
