@@ -1,3 +1,5 @@
+use std::collections::{HashMap, HashSet};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LoadMode {
     ReadOnly,
@@ -28,7 +30,7 @@ pub enum SymbolScope {
     Weak,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Symbol {
     pub name: String,
     pub kind: SymbolKind,
@@ -62,8 +64,9 @@ pub struct Image {
     pub alignment: u64, // integer that is a power of 2
     pub segments: Vec<LoadSegment>, // sorted in ascending order
     pub symbols: Vec<Symbol>,
-    pub needed: Vec<String>,
     pub relocations: Vec<Relocation>,
+    pub dependencies: Vec<String>, // requests images by name
+    pub image_name: Option<String>, // requested via dependencies
     pub entry: u64,
 }
 
@@ -91,5 +94,67 @@ impl Image {
             relocation.offset += offset;
         }
         self.entry += offset;
+    }
+
+    pub fn merge_into(mut self, target: &mut Image) {
+        // Check that the two images can be merged.
+        assert!(self.machine == target.machine);
+        assert!(self.alignment == target.alignment);
+        // Relocate this image to be fully above the target.
+        let (_target_begin, target_end) = target.segment_bounds();
+        eprintln!("merge_into: rebasing source image by +{:#x}", target_end);
+        self.rebase(target_end);
+        // Merge this image's segments.
+        target.segments.append(&mut self.segments);
+        // Index the target image's symbol table.
+        let mut target_symbol_map = HashMap::new();
+        for (symbol_index, symbol) in target.symbols.iter().enumerate() {
+            if target_symbol_map.insert(symbol.name.clone(), symbol_index).is_some() {
+                panic!("Duplicate symbol {} in target image", symbol.name.as_str());
+            }
+        }
+        // Merge symbols.
+        for source_symbol in self.symbols.into_iter() {
+            let symbol_name = source_symbol.name.to_owned();
+            let target_symbol = target_symbol_map.get(&symbol_name).map(|index| &mut target.symbols[*index]);
+            match (source_symbol, target_symbol) {
+                (source_symbol, None) => {
+                    eprintln!("merge_into: adding new symbol {}", &symbol_name);
+                    target.symbols.push(source_symbol)
+                }
+                (source_symbol @ Symbol { scope: SymbolScope::Global, .. },
+                 Some(target_symbol @ &mut Symbol { scope: SymbolScope::Import, .. })) => {
+                    eprintln!("merge_into: using global symbol {} to resolve import", &symbol_name);
+                    target_symbol.scope = SymbolScope::Global;
+                    target_symbol.kind = source_symbol.kind;
+                    target_symbol.value = source_symbol.value;
+                },
+                (_, _) if symbol_name == "_init" || symbol_name == "_fini" =>
+                    eprintln!("merge_into: ignoring special symbol {}", &symbol_name),
+                (source_symbol, Some(target_symbol)) if &source_symbol == target_symbol => (),
+                (source_symbol, Some(target_symbol)) => {
+                    panic!("Cannot merge source symbol {:?} into target symbol {:?}",
+                        source_symbol, target_symbol)
+                }
+            }
+        }
+        // Merge relocations. Relocations can never be removed, even if they refer to the self.
+        target.relocations.append(&mut self.relocations);
+        // Merge dependencies.
+        let mut target_dependency_set = HashSet::new();
+        for target_dependency in target.dependencies.iter() {
+            target_dependency_set.insert(target_dependency.clone());
+        }
+        for source_dependency in self.dependencies.into_iter() {
+            if target_dependency_set.insert(source_dependency.clone()) {
+                eprintln!("merge_into: adding new dependency {:?}", source_dependency);
+            }
+        }
+        if let Some(source_image_name) = self.image_name.as_ref() {
+            if target_dependency_set.remove(source_image_name) {
+                eprintln!("merge_into: removing extinguished dependency {:?}", &source_image_name);
+            }
+        }
+        target.dependencies = target_dependency_set.into_iter().collect::<Vec<_>>();
     }
 }

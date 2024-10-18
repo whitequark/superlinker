@@ -56,8 +56,8 @@ pub fn emit_elf(image: &Image) -> object::write::Result<Vec<u8>> {
     // Reserve space for dynamic linker information.
     // This is the stuff the dynamic linker *really* cares about.
     let mut out_needful = Vec::new();
-    for needed in image.needed.iter() {
-        out_needful.push(obj_writer.add_dynamic_string(needed.as_ref()));
+    for dependency in image.dependencies.iter() {
+        out_needful.push(obj_writer.add_dynamic_string(dependency.as_ref()));
     }
     let mut out_dynsyms = Vec::new();
     for symbol in image.symbols.iter() {
@@ -68,7 +68,7 @@ pub fn emit_elf(image: &Image) -> object::write::Result<Vec<u8>> {
     }
     obj_writer.reserve(0, image.alignment as usize);
     let dynamic_count =
-        /* DT_NEEDED */image.needed.len()
+        /* DT_NEEDED */image.dependencies.len()
         + /* DT_STRTAB */1
         + /* DT_STRSZ */1
         + /* DT_SYMENT */1

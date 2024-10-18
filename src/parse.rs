@@ -5,7 +5,7 @@ use elf::ElfBytes;
 
 use crate::repr::*;
 
-pub fn parse_elf<E: EndianParse>(elf_data: &[u8]) -> Result<Image, elf::parse::ParseError> {
+pub fn parse_elf<E: EndianParse>(elf_data: &[u8], soname: Option<&str>) -> Result<Image, elf::parse::ParseError> {
     let elf_file = ElfBytes::<E>::minimal_parse(elf_data)?;
     let machine = elf_file.ehdr.e_machine;
     let elf_common = elf_file.find_common_data()?;
@@ -95,16 +95,6 @@ pub fn parse_elf<E: EndianParse>(elf_data: &[u8]) -> Result<Image, elf::parse::P
     let elf_dynamic = elf_common.dynamic.map(|elf_dynamic| {
         elf_dynamic.into_iter().collect::<Vec<_>>()
     }).unwrap_or(Vec::new());
-    let needed = elf_dynamic.iter().filter_map(|elf_dyn| {
-        if elf_dyn.d_tag == DT_NEEDED {
-            Some(elf_dynsyms_strs
-                .get(elf_dyn.clone().d_val() as usize)
-                .expect("Invalid DT_NEEDED name")
-                .to_owned())
-        } else {
-            None
-        }
-    }).collect::<Vec<_>>();
     let parse_elf_rela = |elf_rela_data| {
         RelaIterator::new(elf_file.ehdr.endianness, elf_file.ehdr.class, elf_rela_data)
             .map(|elf_rela| {
@@ -187,14 +177,27 @@ pub fn parse_elf<E: EndianParse>(elf_data: &[u8]) -> Result<Image, elf::parse::P
     let mut relocations = Vec::new();
     relocations.append(&mut data_relocations);
     relocations.append(&mut code_relocations);
+    let dependencies = elf_dynamic.iter().filter_map(|elf_dyn| {
+        if elf_dyn.d_tag == DT_NEEDED {
+            Some(elf_dynsyms_strs
+                .get(elf_dyn.clone().d_val() as usize)
+                .expect("Invalid DT_NEEDED name")
+                .to_owned())
+        } else {
+            None
+        }
+    }).collect::<Vec<_>>();
+    // TODO: DT_SONAME(s) must take priority
+    let image_name = soname.map(|name| name.to_owned());
     let entry = elf_file.ehdr.e_entry;
     Ok(Image {
         machine,
         alignment,
         segments,
         symbols,
-        needed,
         relocations,
+        dependencies,
+        image_name,
         entry,
     })
 }
