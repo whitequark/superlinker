@@ -129,6 +129,25 @@ impl Image {
         self.rebase(target_end);
         // Merge this image's segments.
         target.segments.append(&mut self.segments);
+        match (&self.interpreter, &mut target.interpreter) {
+            (Interpreter::Absent, Interpreter::Absent) |
+            (Interpreter::Absent, Interpreter::External(..)) => {
+                // Merging executable + library or library + library
+                self.merge_dynamic(target);
+            }
+            (source_interpreter @ Interpreter::Internal { .. },
+             target_interpreter @ Interpreter::External(_)) => {
+                // Merging interpreter + executable
+                eprintln!("merge_into: embedding the source image into target object as its interpreter");
+                *target_interpreter = source_interpreter.clone();
+            }
+            (source_interpreter, target_interpreter) =>
+                panic!("Cannot merge source object with interpreter {:?} into target object with interpreter {:?}",
+                    source_interpreter, target_interpreter)
+        }
+    }
+
+    fn merge_dynamic(mut self, target: &mut Image) {
         // Index the target image's symbol table.
         let mut target_symbol_map = HashMap::new();
         for (symbol_index, symbol) in target.symbols.iter().enumerate() {
@@ -203,20 +222,5 @@ impl Image {
             }
         }
         target.dependencies = target_dependency_set.into_iter().collect::<Vec<_>>();
-        // Merge the interpreters.
-        match (&self.interpreter, &mut target.interpreter) {
-            (Interpreter::Absent, Interpreter::Absent) |
-            (Interpreter::Absent, Interpreter::External(..)) => (),
-            (Interpreter::External(ref source_path),
-             Interpreter::External(ref target_path)) if source_path == target_path => (),
-            (source_interpreter @ Interpreter::Internal { .. },
-             target_interpreter @ Interpreter::External(_)) => {
-                eprintln!("merge_into: embedding the source image into target object as its interpreter");
-                *target_interpreter = source_interpreter.clone();
-            }
-            (source_interpreter, target_interpreter) =>
-                panic!("Cannot merge source object with interpreter {:?} into target object with interpreter {:?}",
-                    source_interpreter, target_interpreter)
-        }
     }
 }
