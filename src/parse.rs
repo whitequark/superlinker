@@ -5,11 +5,19 @@ use elf::ElfBytes;
 
 use crate::repr::*;
 
-pub fn parse_elf<E: EndianParse>(elf_data: &[u8]) -> Image {
-    let elf_file = ElfBytes::<E>::minimal_parse(elf_data).expect("Unparseable ELF");
-    let elf_common = elf_file.find_common_data().expect("No ELF common data");
-    let segments = elf_file.segments()
-        .expect("No segments")
+pub fn parse_elf<E: EndianParse>(elf_data: &[u8]) -> Result<Image, elf::parse::ParseError> {
+    let elf_file = ElfBytes::<E>::minimal_parse(elf_data)?;
+    let machine = elf_file.ehdr.e_machine;
+    let elf_common = elf_file.find_common_data()?;
+    let elf_segments = elf_file.segments().expect("No segments");
+    let alignment = elf_segments
+        .iter()
+        .filter_map(|elf_segment| {
+            if elf_segment.p_type == PT_LOAD { Some(elf_segment.p_align) } else { None }
+        })
+        .max()
+        .unwrap_or(1);
+    let segments = elf_segments
         .iter()
         .filter_map(|elf_segment| {
             if elf_segment.p_type == PT_LOAD {
@@ -40,32 +48,45 @@ pub fn parse_elf<E: EndianParse>(elf_data: &[u8]) -> Image {
     let symbols = elf_dynsyms
         .clone()
         .into_iter()
+        .skip(1)
         .filter_map(|elf_symbol| {
+            // The type of the symbol can be `STT_NOTYPE` if it is a reference to a symbol that the static linker could
+            // not discover at link time. This is independent of how the symbol was declared in C, i.e. `extern int a;`,
+            // `extern int a(void);`, and `extern double a;` all become `STT_NOTYPE` when the symbol isn't resolved.
+            // Weak symbols generally end up as `STT_NOTYPE`, unless defined in the same object.
             let elf_symtype = elf_symbol.st_symtype();
-            if elf_symtype == STT_FUNC || elf_symtype == STT_OBJECT {
+            if elf_symtype == STT_FUNC || elf_symtype == STT_OBJECT || elf_symtype == STT_NOTYPE {
                 let name = elf_dynsyms_strs
                     .get(elf_symbol.st_name as usize)
                     .expect("Invalid symbol name")
                     .to_owned();
                 let kind = if elf_symtype == STT_FUNC {
                     SymbolKind::Code
-                } else {
+                } else if elf_symtype == STT_OBJECT {
                     SymbolKind::Data
+                } else {
+                    SymbolKind::Unknown
                 };
                 let value = elf_symbol.st_value;
-                let elf_symvis = elf_symbol.st_vis();
-                let scope = if elf_symvis == STB_LOCAL {
-                    SymbolScope::Local
-                } else if elf_symvis == STB_GLOBAL {
-                    SymbolScope::Global
-                } else if elf_symvis == STB_WEAK {
+                let scope = if elf_symbol.st_bind() == STB_GLOBAL {
+                    if elf_symbol.is_undefined() {
+                        SymbolScope::Import
+                    } else {
+                        SymbolScope::Global
+                    }
+                } else if elf_symbol.st_bind() == STB_WEAK {
                     SymbolScope::Weak
+                } else if elf_symbol.st_bind() == STB_LOCAL {
+                        SymbolScope::Local
                 } else {
                     panic!("Unhandled symbol visibility: {}",
-                        elf::to_str::st_vis_to_str(elf_symbol.st_vis())
-                        .unwrap_or("<unknown>"))
+                        elf::to_str::st_bind_to_str(elf_symbol.st_bind()).unwrap_or("<unknown>"))
                 };
-                Some(Symbol { name, kind, value, scope })
+                if elf_symbol.st_shndx == SHN_ABS || elf_symbol.st_shndx == SHN_COMMON {
+                    panic!("Unhandled special symbol");
+                }
+                let size = elf_symbol.st_size;
+                Some(Symbol { name, kind, scope, value, size })
             } else {
                 None
             }
@@ -98,6 +119,8 @@ pub fn parse_elf<E: EndianParse>(elf_data: &[u8]) -> Image {
                             .expect("Invalid symbol name in relocation");
                         Some(elf_symbol_name.to_owned())
                     };
+                    // Both `R_X86_64_GLOB_DAT` and `R_X86_64_JUMP_SLOT` relocations can be expressed in terms of
+                    // the more general and less optimized `R_X86_64_64` relocation, which is what the emitter is using.
                     if elf_rela.r_type == R_X86_64_GLOB_DAT {
                         RelocationTarget::Symbol {
                             symbol: symbol.expect("R_X86_64_GLOB_DAT requires a symbol"),
@@ -153,7 +176,7 @@ pub fn parse_elf<E: EndianParse>(elf_data: &[u8]) -> Image {
             // } else if elf_dynamic_pltrel == DT_REL {
             //     parse_elf_rel(elf_pltrel_data)
             } else {
-                panic!("Unhangled PLT relocation type: {}",
+                panic!("Unhandled PLT relocation type: {}",
                     elf::to_str::d_tag_to_str(elf_dynamic_pltrel)
                     .unwrap_or("<unknown>"));
             }
@@ -164,10 +187,14 @@ pub fn parse_elf<E: EndianParse>(elf_data: &[u8]) -> Image {
     let mut relocations = Vec::new();
     relocations.append(&mut data_relocations);
     relocations.append(&mut code_relocations);
-    Image {
+    let entry = elf_file.ehdr.e_entry;
+    Ok(Image {
+        machine,
+        alignment,
         segments,
         symbols,
         needed,
         relocations,
-    }
+        entry,
+    })
 }

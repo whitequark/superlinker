@@ -2,11 +2,26 @@ use elf::endian::AnyEndian;
 
 mod repr;
 mod parse;
+mod emit;
+
+fn make_executable<P: AsRef<std::path::Path>>(path: P) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut perms = std::fs::metadata(&path)?.permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&path, perms)?;
+    Ok(())
+}
 
 fn main() {
-    let entry_file = std::env::args().nth(1).expect("Usage: $0 <file.elf>");
-    let file_data = std::fs::read(entry_file).expect("Could not read file");
-    // let file = ElfBytes::<NativeEndian>::minimal_parse(&file_data).expect("Could not parse ELF");
-    let image = parse::parse_elf::<AnyEndian>(&file_data[..]);
-    dbg!(image);
+    let output_filename = std::env::args().nth(1).expect("Usage: $0 <output.elf> <input.elf>");
+    let input_filename = std::env::args().nth(2).expect("Usage: $0 <output.elf> <input.elf>");
+
+    let input_data = std::fs::read(&input_filename).expect("Could not read input file");
+    // let file = ElfBytes::<NativeEndian>::minimal_parse(&input_data).expect("Could not parse ELF");
+    let image = parse::parse_elf::<AnyEndian>(&input_data[..]).expect("Could not parse input file");
+
+    let new_file_data = emit::emit_elf(&image).expect("Could not emit output file");
+    std::fs::write(&output_filename, new_file_data).expect("Could not write output file");
+    make_executable(&output_filename).expect("Could not make output file executable");
 }
