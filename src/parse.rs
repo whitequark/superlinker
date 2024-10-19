@@ -268,14 +268,26 @@ pub fn parse_elf<E: EndianParse>(elf_data: &[u8], soname: Option<&str>) -> Resul
         }
     }).unwrap_or_else(|| {
         if elf_file.ehdr.e_entry != 0 {
-            // If PT_INTERP does not exist (and this is an ET_DYN), but there is an entry point, then this object is its
-            // own interpreter. Record the values required to invoke it according to the ABI later.
+            // If PT_INTERP does not exist (and this is an ET_DYN), but there is an entry point, then this object is
+            // its own interpreter. Record the values required to invoke it according to the kernel ABI later, once
+            // we combine it with something to load.
             Interpreter::Internal {
                 // Assume the PIE isn't prelinked to a weird address, which really shouldn't happen; it's a real pain
                 // to try and figure out exactly what the base is supposed to be, since it doesn't explicitly appear in
                 // any of the ELF structures.
-                base:  0,
+                base: 0,
                 entry: elf_file.ehdr.e_entry,
+                // musl libc does some hair-raising manipulations with segments; namely, it uses padding around segment
+                // data as Free Real Estate™ for its malloc, in both the dynamic linker itself (ld.so) as well as
+                // whatever it's loading. While this works fine with normal kernel PT_INTERP logic, ours is pecularly
+                // different in that the image of the interpreter overlaps the image of the loadee. As a result, musl's
+                // dynamic loader causes its malloc to perform a 'double alloc', which is somehow even more destructive
+                // than a double free. To avoid this, we're hiding the interpreter from itself by reducing the amount
+                // of program headers available via `auxv[AT_PHNUM]`, which is the ABI-prescribed mechanism for ld.so
+                // to find out how many it needs to relocate. The success of this requires ld.so to not look at
+                // the actual ELF header for our binary, but since it doesn't even have a pointer to it, this should
+                // all work just fine.
+                segments: segments.len(),
             }
         } else {
             // Probably just a shared library.

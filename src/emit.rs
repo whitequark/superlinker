@@ -7,7 +7,14 @@ fn make_static_str(s: impl AsRef<str>) -> &'static str {
     s.as_ref().to_owned().leak()
 }
 
-fn make_stub(machine: u16, base: u64, interp_base: u64, interp_entry: u64, user_entry: u64) -> Vec<u8> {
+fn make_stub(
+    machine: u16,
+    base: u64,
+    interp_base: u64,
+    interp_phdrs: usize,
+    interp_entry: u64,
+    user_entry: u64
+) -> Vec<u8> {
     // When the interpreter is loaded by the kernel, the kernel communicates several key parameters to it through
     // the auxiliary vector; most importantly, AT_BASE, AT_ENTRY, and AT_PH*. For the dynamic loader to function,
     // AT_BASE must be set to its own ELF header (to which it maintains an internal PC-relative reference).
@@ -22,29 +29,38 @@ fn make_stub(machine: u16, base: u64, interp_base: u64, interp_entry: u64, user_
     // the PIE entry point). Since we interpose this stub using the `e_entry` file header field, we must restore
     // the original `e_entry` by modifying `AT_ENTRY`.
     if machine == EM_X86_64 {
-        let i1 =  interp_base as i64 - (base as i64 + 46);
-        let i2 =   user_entry as i64 - (base as i64 + 55);
-        let i3 = interp_entry as i64 - (base as i64 + 74);
-        vec![
-            0x48, 0x89, 0xe7,
-            0x48, 0x8b, 0x3f,
-            0x48, 0x8d, 0x7c, 0xfc, 0x08,
-            0x48, 0x83, 0xc7, 0x08,
+        let i1 = interp_entry as i64 - (base as i64 + 30);
+        let i2 =  interp_base as i64 - (base as i64 + 43);
+        let i3 =   user_entry as i64 - (base as i64 + 60);
+        let i4 = interp_phdrs as u8;
+        let mut code = vec![
+            0x48, 0x8b, 0x3c, 0x24,
+            0x48, 0x8d, 0x7c, 0xfc, 0x10,
+
             0x48, 0x83, 0x3f, 0x00,
+            0x48, 0x8d, 0x7f, 0x08,
             0x75, 0xf6,
-            0x48, 0x83, 0xc7, 0x08,
-            0x48, 0x83, 0x3f, 0x07, 0x74, 0x08, // AT_BASE  = 0x7
-            0x48, 0x83, 0x3f, 0x09, 0x74, 0x0b, // AT_ENTRY = 0x9
-            0xeb, 0x14,
-            0x48, 0x8d, 0x35, (i1&0xff) as u8, (i1>>8) as u8, (i1>>16) as u8, (i1>>24) as u8,
-            0xeb, 0x07,
+
+            0x48, 0x83, 0x3f, 0x00,
+            0x75, 0x05,
+            0xe9, (i1&0xff) as u8, (i1>>8) as u8, (i1>>16) as u8, (i1>>24) as u8,
+
+            0x48, 0x83, 0x3f, 0x07, 0x75, 0x0b, // AT_BASE  = 0x7
             0x48, 0x8d, 0x35, (i2&0xff) as u8, (i2>>8) as u8, (i2>>16) as u8, (i2>>24) as u8,
             0x48, 0x89, 0x77, 0x08,
+
+            0x48, 0x83, 0x3f, 0x09, 0x75, 0x0b, // AT_ENTRY = 0x9
+            0x48, 0x8d, 0x35, (i3&0xff) as u8, (i3>>8) as u8, (i3>>16) as u8, (i3>>24) as u8,
+            0x48, 0x89, 0x77, 0x08,
+
+            0x48, 0x83, 0x3f, 0x05, 0x75, 0x05, // AT_PHNUM = 0x5
+            0x48, 0x83, 0x6f, 0x08, i4,
+
             0x48, 0x83, 0xc7, 0x10,
-            0x48, 0x83, 0x3f, 0x00,
-            0x75, 0xd4,
-            0xe9, (i3&0xff) as u8, (i3>>8) as u8, (i3>>16) as u8, (i3>>24) as u8,
-        ]
+            0xeb, 0xc2,
+        ];
+        code.resize(((code.len() - 1) | 0xff) + 1, 0); // pad to make it easier to edit in binja
+        code
     } else {
         panic!("Stub not implemented for machine: {:?}", machine)
     }
@@ -54,7 +70,7 @@ pub fn emit_elf(image: &Image) -> object::write::Result<Vec<u8>> {
     #[derive(Debug)]
     enum InterpreterOut {
         Path { bytes: Vec<u8> },
-        Stub { base: u64, entry: u64, code_len: usize },
+        Stub { base: u64, entry: u64, phdrs: usize, code_len: usize },
         None,
     }
 
@@ -91,9 +107,9 @@ pub fn emit_elf(image: &Image) -> object::write::Result<Vec<u8>> {
             bytes.push(0);
             InterpreterOut::Path { bytes }
         }
-        Interpreter::Internal { base, entry } => {
-            let code = make_stub(image.machine, 0, 0, 0, 0); // can't resolve references yet
-            InterpreterOut::Stub { base, entry, code_len: code.len() }
+        Interpreter::Internal { base, entry, segments: phdrs } => {
+            let code = make_stub(image.machine, 0, 0, 0, 0, 0); // can't resolve references yet
+            InterpreterOut::Stub { base, entry, phdrs, code_len: code.len() }
         },
         Interpreter::Absent =>
             InterpreterOut::None
@@ -287,11 +303,15 @@ pub fn emit_elf(image: &Image) -> object::write::Result<Vec<u8>> {
             obj_writer.pad_until(obj_interp_offset);
             obj_writer.write(&bytes);
         }
-        InterpreterOut::Stub { base: interp_base, entry: interp_entry, code_len } => {
-            let code = make_stub(image.machine, obj_stub_offset as u64,
+        InterpreterOut::Stub { base: interp_base, entry: interp_entry, phdrs: interp_phdrs, code_len } => {
+            let code = make_stub(
+                image.machine,
+                obj_stub_offset as u64,
                 image_file_offset as u64 + *interp_base,
+                *interp_phdrs,
                 image_file_offset as u64 + *interp_entry,
-                image_file_offset as u64 + image.entry);
+                image_file_offset as u64 + image.entry
+            );
             assert_eq!(code.len(), *code_len);
             obj_writer.pad_until(obj_stub_offset);
             obj_writer.write(&code);

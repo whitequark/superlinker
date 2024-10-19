@@ -67,7 +67,7 @@ pub struct Relocation {
 pub enum Interpreter {
     Absent,
     External(String),
-    Internal { base: u64, entry: u64 },
+    Internal { base: u64, entry: u64, segments: usize },
 }
 
 #[derive(Debug, Clone)]
@@ -115,7 +115,7 @@ impl Image {
         }
         match self.interpreter {
             Interpreter::Absent | Interpreter::External(_) => (),
-            Interpreter::Internal { ref mut base, ref mut entry } => {
+            Interpreter::Internal { ref mut base, ref mut entry, .. } => {
                 *base += offset;
                 *entry += offset;
             },
