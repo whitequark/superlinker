@@ -169,7 +169,10 @@ pub fn emit_elf(image: &Image) -> object::write::Result<Vec<u8>> {
         + /* DT_REL(A) */1
         + /* DT_REL(A)SZ */1
         + /* DT_REL(A)ENT */1
-        + /* DT_NULL */1
+        + /* DT_INIT_ARRAY */1
+        + /* DT_INIT_ARRAYSZ */1
+        + /* DT_FINI_ARRAY */1
+        + /* DT_FINI_ARRAYSZ */1
         + /* DT_NULL */1;
     let obj_dynamic_offset = obj_writer.reserve_dynamic(dynamic_count);
     let obj_dynstr_offset = obj_writer.reserve_dynstr();
@@ -179,7 +182,12 @@ pub fn emit_elf(image: &Image) -> object::write::Result<Vec<u8>> {
     let hash_index_base = 1; // null symbol
     let hash_chain_count = hash_index_base + out_dynsyms.len() as u32;
     let obj_hash_offset = obj_writer.reserve_hash(hash_bucket_count, hash_chain_count);
-    let obj_reloc_offset = obj_writer.reserve_relocations(image.relocations.len(), is_rela);
+    let relocation_count = image.relocations.len() + image.initializers.len() + image.finalizers.len();
+    let obj_reloc_offset = obj_writer.reserve_relocations(relocation_count, is_rela);
+    let obj_dt_init_array_length = image.initializers.len() * if class.is_64 { 8 } else { 4 };
+    let obj_dt_init_array_offset = obj_writer.reserve(obj_dt_init_array_length, class.align() as usize);
+    let obj_dt_fini_array_length = image.finalizers.len() * if class.is_64 { 8 } else { 4 };
+    let obj_dt_fini_array_offset = obj_writer.reserve(obj_dt_fini_array_length, class.align() as usize);
     let obj_tls_offset = if let Some(ref tls_data) = image.tls_image {
         obj_writer.reserve(tls_data.len(), class.align() as usize)
     } else { 0 };
@@ -230,6 +238,7 @@ pub fn emit_elf(image: &Image) -> object::write::Result<Vec<u8>> {
 
     // Reserve space for image segments.
     let image_file_offset = obj_writer.reserve(0, image.alignment as usize);
+    eprintln!("emit_elf: emitting images at offset {:+#x}", image_file_offset);
     for segment in image.segments.iter() {
         assert!(segment.data.len() as u64 <= segment.size);
         obj_writer.reserve_until(image_file_offset + segment.addr as usize + segment.size as usize);
@@ -344,10 +353,13 @@ pub fn emit_elf(image: &Image) -> object::write::Result<Vec<u8>> {
     obj_writer.write_dynamic(if is_rela { DT_RELA } else { DT_REL },
         obj_reloc_offset as u64);
     obj_writer.write_dynamic(if is_rela { DT_RELASZ } else { DT_RELSZ },
-        (class.rel_size(is_rela) * image.relocations.len()) as u64);
+        (class.rel_size(is_rela) * relocation_count) as u64);
     obj_writer.write_dynamic(if is_rela { DT_RELAENT } else { DT_RELENT },
         class.rel_size(is_rela) as u64);
-    obj_writer.write_dynamic(DT_NULL, 0);
+    obj_writer.write_dynamic(DT_INIT_ARRAY, obj_dt_init_array_offset as u64);
+    obj_writer.write_dynamic(DT_INIT_ARRAYSZ, obj_dt_init_array_length as u64);
+    obj_writer.write_dynamic(DT_FINI_ARRAY, obj_dt_fini_array_offset as u64);
+    obj_writer.write_dynamic(DT_FINI_ARRAYSZ, obj_dt_fini_array_length as u64);
     obj_writer.write_dynamic(DT_NULL, 0);
     obj_writer.write_dynstr();
     obj_writer.write_null_dynamic_symbol();
@@ -439,6 +451,16 @@ pub fn emit_elf(image: &Image) -> object::write::Result<Vec<u8>> {
             r_addend: obj_addend,
         });
     }
+    for (index, lifetimizer) in image.initializers.iter().chain(image.finalizers.iter()).enumerate() {
+        obj_writer.write_relocation(is_rela, &Rel {
+            // All DT_INIT/DT_INIT_ARRAY/DT_FINI_ARRAY/DT_FINI addresses must be relocated with the object.
+            r_offset: (obj_dt_init_array_offset + index * 8) as u64,
+            r_sym: 0,
+            r_type: R_X86_64_RELATIVE,
+            r_addend: (image_file_offset as u64 + *lifetimizer) as i64,
+        });
+    }
+    obj_writer.pad_until(obj_dt_fini_array_offset + obj_dt_fini_array_length);
     if let Some(ref tls_data) = image.tls_image {
         obj_writer.write(&tls_data);
     }
@@ -457,10 +479,10 @@ pub fn emit_elf(image: &Image) -> object::write::Result<Vec<u8>> {
         sh_flags: SHF_ALLOC as u64,
         sh_addr: obj_reloc_offset as u64,
         sh_offset: obj_reloc_offset as u64,
-        sh_size: (class.rel_size(is_rela) * image.relocations.len()) as u64,
+        sh_size: (class.rel_size(is_rela) * relocation_count) as u64,
         sh_link: obj_dynsym_section_index.0,
         sh_info: 0,
-        sh_addralign: class.rel_size(is_rela) as u64,
+        sh_addralign: class.align() as u64,
         sh_entsize: class.rel_size(is_rela) as u64,
     });
     if let InterpreterOut::Shim { code_len, .. } = out_interp {

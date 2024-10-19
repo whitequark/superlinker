@@ -91,7 +91,6 @@ Although the core approach is sound, this implementation has flaws, most of whic
 - Exception handling currently isn't supported, and `PT_GNU_EH_FRAME` is stripped.
 - The handling of shared object naming and dependencies is not robust and currently relies on filesystem basename rather than `DT_SONAME`.
     - `DT_SONAME` should be used for both dependency resolution and as a manifest of contents of the produced objects.
-- `DT_INIT`, `DT_INIT_TABLE`, `DT_FINI`, and `DT_FINI_TABLE` are currently unsupported and stripped. (They're not used much.)
 - Objects are linked in exactly the order in which they are provided on the command line. Cycles are OK though.
 - Some of the internal book-keeping probably has O(n²) complexity.
 

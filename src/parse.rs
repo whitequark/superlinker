@@ -273,6 +273,64 @@ pub fn parse_elf<E: EndianParse>(elf_data: &[u8], soname: Option<&str>) -> Resul
             None
         }
     }).collect::<Vec<_>>();
+    let elf_dynamic_init = elf_dynamic.iter().find_map(|elf_dyn| {
+        if elf_dyn.d_tag == DT_INIT { Some(elf_dyn.clone().d_val() as usize) } else { None }
+    });
+    let elf_dynamic_init_array = elf_dynamic.iter().find_map(|elf_dyn| {
+        if elf_dyn.d_tag == DT_INIT_ARRAY { Some(elf_dyn.clone().d_val() as usize) } else { None }
+    });
+    let elf_dynamic_init_arraysz = elf_dynamic.iter().find_map(|elf_dyn| {
+        if elf_dyn.d_tag == DT_INIT_ARRAYSZ { Some(elf_dyn.clone().d_val() as usize) } else { None }
+    });
+    let elf_dynamic_fini = elf_dynamic.iter().find_map(|elf_dyn| {
+        if elf_dyn.d_tag == DT_FINI { Some(elf_dyn.clone().d_val() as usize) } else { None }
+    });
+    let elf_dynamic_fini_array = elf_dynamic.iter().find_map(|elf_dyn| {
+        if elf_dyn.d_tag == DT_FINI_ARRAY { Some(elf_dyn.clone().d_val() as usize) } else { None }
+    });
+    let elf_dynamic_fini_arraysz = elf_dynamic.iter().find_map(|elf_dyn| {
+        if elf_dyn.d_tag == DT_FINI_ARRAYSZ { Some(elf_dyn.clone().d_val() as usize) } else { None }
+    });
+    let addend_to_unmap_at = |address| elf_segments.iter().find_map(|elf_segment| {
+        if (address as u64) >= elf_segment.p_vaddr &&
+                (address as u64) < elf_segment.p_vaddr + elf_segment.p_memsz {
+            Some(elf_segment.p_offset as isize - elf_segment.p_vaddr as isize)
+        } else {
+            None
+        }
+    });
+    let mut initializers = Vec::new();
+    if let Some(init_func) = elf_dynamic_init { initializers.push(init_func as u64) }
+    match (elf_dynamic_init_array, elf_dynamic_init_arraysz) {
+        (Some(init_func_array), Some(init_func_array_sz)) => {
+            let init_func_array = init_func_array.wrapping_add_signed(addend_to_unmap_at(init_func_array)
+                .expect("DT_INIT_ARRAY not part of any segment"));
+            let parse = E::from_ei_data(elf_data[EI_DATA]).unwrap();
+            let elf_init_funcs = &elf_data[init_func_array..init_func_array + init_func_array_sz];
+            let mut offset = 0;
+            while offset < init_func_array_sz {
+                initializers.push(parse.parse_u64_at(&mut offset, elf_init_funcs).unwrap())
+            }
+        }
+        (None, None) => (),
+        _ => panic!("Expected dynamic table to have both or neither of DT_INIT_ARRAY and DT_INIT_ARRAYSZ")
+    }
+    let mut finalizers = Vec::new();
+    match (elf_dynamic_fini_array, elf_dynamic_fini_arraysz) {
+        (Some(fini_func_array), Some(fini_func_array_sz)) => {
+            let fini_func_array = fini_func_array.wrapping_add_signed(addend_to_unmap_at(fini_func_array)
+                .expect("DT_FINI_ARRAY not part of any segment"));
+            let parse = E::from_ei_data(elf_data[EI_DATA]).unwrap();
+            let elf_fini_funcs = &elf_data[fini_func_array..fini_func_array + fini_func_array_sz];
+            let mut offset = 0;
+            while offset < fini_func_array_sz {
+                finalizers.push(parse.parse_u64_at(&mut offset, elf_fini_funcs).unwrap())
+            }
+        }
+        (None, None) => (),
+        _ => panic!("Expected dynamic table to have both or neither of DT_FINI_ARRAY and DT_FINI_ARRAYSZ")
+    }
+    if let Some(init_func) = elf_dynamic_fini { finalizers.push(init_func as u64) }
     // TODO: DT_SONAME(s) must take priority
     let image_name = soname.map(|name| name.to_owned());
     let interpreter = elf_segments.iter().find_map(|elf_segment| {
@@ -321,6 +379,8 @@ pub fn parse_elf<E: EndianParse>(elf_data: &[u8], soname: Option<&str>) -> Resul
         tls_image,
         symbols,
         relocations,
+        initializers,
+        finalizers,
         dependencies,
         image_name,
         interpreter,

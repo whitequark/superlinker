@@ -80,6 +80,8 @@ pub struct Image {
     pub tls_image: Option<Vec<u8>>,
     pub symbols: Vec<Symbol>,
     pub relocations: Vec<Relocation>,
+    pub initializers: Vec<u64>,
+    pub finalizers: Vec<u64>,
     pub dependencies: Vec<String>, // requests images by name
     pub image_name: Option<String>, // requested via dependencies
     pub interpreter: Interpreter,
@@ -116,6 +118,12 @@ impl Image {
                 RelocationTarget::None |
                 RelocationTarget::ElfSpecific(_) => ()
             }
+        }
+        for initializer in self.initializers.iter_mut() {
+            *initializer += offset;
+        }
+        for finalizer in self.finalizers.iter_mut() {
+            *finalizer += offset;
         }
         match self.interpreter {
             Interpreter::Absent | Interpreter::External(_) => (),
@@ -274,6 +282,8 @@ impl Image {
         }
         // Merge relocations. Relocations can never be removed, even if they refer to the self.
         target.relocations.append(&mut self.relocations);
+        // Merge initializers and finalizers.
+        target.initializers.append(&mut self.initializers);
         // Merge dependencies.
         let mut target_dependency_set = HashSet::new();
         for target_dependency in target.dependencies.iter() {
