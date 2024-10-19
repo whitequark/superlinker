@@ -115,6 +115,29 @@ pub fn emit_elf(image: &Image) -> object::write::Result<Vec<u8>> {
             InterpreterOut::None
     };
 
+    let mut out_gdb_script = Vec::new();
+    out_gdb_script.extend_from_slice(b"\x04superlinker\n");
+    out_gdb_script.extend_from_slice(br#"
+initialized = False
+
+def new_objfile_handler(event):
+    global initialized
+    if not initialized:
+        initialized = True
+        init_debugging()
+
+def clear_objfiles_handler(event):
+    global initialized
+    initialized = False
+
+gdb.events.new_objfile.connect(new_objfile_handler)
+gdb.events.clear_objfiles.connect(clear_objfiles_handler)
+
+def init_debugging():
+    load_addr = int(gdb.parse_and_eval("&__elf_header"))
+    print(f"Program loaded at: {load_addr:#x}")
+"#);
+
     let mut elf_data = Vec::new();
     let mut obj_writer = Writer::new(endian, class.is_64, &mut elf_data);
 
@@ -154,6 +177,13 @@ pub fn emit_elf(image: &Image) -> object::write::Result<Vec<u8>> {
         let index = obj_writer.reserve_dynamic_symbol_index();
         let name = obj_writer.add_dynamic_string(symbol.name.as_ref());
         let hash = object::elf::hash(symbol.name.as_ref());
+        out_dynsyms.push(DynamicSymbolOut { index, name, hash });
+    }
+    {
+        let symbol_name = b"__elf_header";
+        let index = obj_writer.reserve_dynamic_symbol_index();
+        let name = obj_writer.add_dynamic_string(symbol_name);
+        let hash = object::elf::hash(symbol_name.as_ref());
         out_dynsyms.push(DynamicSymbolOut { index, name, hash });
     }
     obj_writer.reserve(0, image.alignment as usize);
@@ -220,6 +250,9 @@ pub fn emit_elf(image: &Image) -> object::write::Result<Vec<u8>> {
                 segment.addr + segment.data.len() as u64, /*load=*/false);
         }
     }
+    let _obj_gdb_script_section_index = obj_writer.reserve_section_index();
+    let obj_gdb_script_section_name = obj_writer.add_section_name(b".debug_gdb_scripts");
+
     obj_writer.reserve_shstrtab();
     obj_writer.reserve_section_headers();
 
@@ -229,6 +262,19 @@ pub fn emit_elf(image: &Image) -> object::write::Result<Vec<u8>> {
         assert!(segment.data.len() as u64 <= segment.size);
         obj_writer.reserve_until(image_file_offset + segment.addr as usize + segment.size as usize);
     }
+
+    // Reserve space for GDB script.
+    for segment in image.segments.iter() {
+        match segment {
+            LoadSegment { addr: segment_addr, mode: LoadMode::ReadExecute, file: Some(ref filename), .. } => {
+                let addr = image_file_offset as u64 + segment_addr;
+                let script_line = format!("    gdb.execute(f'add-symbol-file {} {{load_addr + {}:#x}}')\n", filename, addr);
+                out_gdb_script.extend_from_slice(script_line.as_bytes())
+            }
+            _ => ()
+        }
+    }
+    let gdb_script_offset = obj_writer.reserve(out_gdb_script.len() + 1, 0);
 
     // Write file and program headers.
     let entry = match &out_interp {
@@ -381,6 +427,15 @@ pub fn emit_elf(image: &Image) -> object::write::Result<Vec<u8>> {
             st_size: symbol.size,
         });
     }
+    obj_writer.write_dynamic_symbol(&Sym {
+        name: Some(obj_writer.get_dynamic_string(b"__elf_header")),
+        section: None,
+        st_info: (STB_GLOBAL << 4) | STT_OBJECT,
+        st_other: 0,
+        st_shndx: 1,
+        st_value: 0,
+        st_size: 1,
+    });
     obj_writer.write_hash(hash_bucket_count, hash_chain_count, |index| {
         Some(out_dynsyms.get(index.checked_sub(hash_index_base)? as usize)?.hash)
     });
@@ -453,7 +508,7 @@ pub fn emit_elf(image: &Image) -> object::write::Result<Vec<u8>> {
                 sh_addr: obj_shim_offset as u64,
                 sh_offset: obj_shim_offset as u64,
                 sh_size: code_len as u64,
-                sh_link: 0,
+                sh_link: SHN_UNDEF as u32,
                 sh_info: 0,
                 sh_addralign: class.align() as u64,
                 sh_entsize: class.align() as u64,
@@ -479,6 +534,18 @@ pub fn emit_elf(image: &Image) -> object::write::Result<Vec<u8>> {
             sh_entsize: 0,
         });
     }
+    obj_writer.write_section_header(&SectionHeader {
+        name: Some(obj_gdb_script_section_name),
+        sh_type: SHT_PROGBITS,
+        sh_flags: 0,
+        sh_addr: 0,
+        sh_offset: gdb_script_offset as u64,
+        sh_size: (out_gdb_script.len() + 1) as u64,
+        sh_link: SHN_UNDEF as u32,
+        sh_info: 0,
+        sh_addralign: 1,
+        sh_entsize: 0,
+    });
 
     // Write image segments.
     for segment in image.segments.iter() {
@@ -486,6 +553,10 @@ pub fn emit_elf(image: &Image) -> object::write::Result<Vec<u8>> {
         obj_writer.write(segment.data.as_ref());
         obj_writer.pad_until(image_file_offset + segment.addr as usize + segment.size as usize);
     }
+
+    // Write GDB script.
+    obj_writer.write(&out_gdb_script);
+    obj_writer.write(&[0]);
 
     // If the reserved amount and written amount are the same, the file is probably good.
     assert_eq!(obj_writer.reserved_len(), obj_writer.len());

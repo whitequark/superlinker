@@ -20,12 +20,14 @@ fn main() {
 
     let input_data = std::fs::read(&input_filename).expect("Could not read input file");
     let input_soname = input_filename.file_name().and_then(|name| name.to_str());
-    let mut input_image = parse::parse_elf::<AnyEndian>(&input_data[..], input_soname).expect("Could not parse input file");
+    let mut input_image = parse::parse_elf::<AnyEndian>(
+        &input_data[..], input_filename.to_str().unwrap(), input_soname).expect("Could not parse input file");
 
     for merge_filename in merge_filenames {
         let merge_data = std::fs::read(&merge_filename).expect("Could not read merge file");
         let merge_soname = merge_filename.file_name().and_then(|name| name.to_str());
-        let merge_image = parse::parse_elf::<AnyEndian>(&merge_data[..], merge_soname).expect("Could not parse merge file");
+        let merge_image = parse::parse_elf::<AnyEndian>(
+            &merge_data[..], merge_filename.to_str().unwrap(), merge_soname).expect("Could not parse merge file");
         merge_image.merge_into(&mut input_image);
     }
 

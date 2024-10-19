@@ -9,7 +9,7 @@ use crate::repr::*;
 pub const DT_RELR: i64 = 36;
 pub const DT_RELRSZ: i64 = 35;
 
-pub fn parse_elf<E: EndianParse>(elf_data: &[u8], soname: Option<&str>) -> Result<Image, elf::parse::ParseError> {
+pub fn parse_elf<E: EndianParse>(elf_data: &[u8], filename: &str, soname: Option<&str>) -> Result<Image, elf::parse::ParseError> {
     let elf_file = ElfBytes::<E>::minimal_parse(elf_data)?;
     let machine = elf_file.ehdr.e_machine;
     let elf_common = elf_file.find_common_data()?;
@@ -40,7 +40,8 @@ pub fn parse_elf<E: EndianParse>(elf_data: &[u8], soname: Option<&str>) -> Resul
                     panic!("Unknown segment flags: {}",
                         elf::to_str::p_flags_to_string(elf_segment.p_flags))
                 };
-                Some(LoadSegment { addr, size, data, mode })
+                let file = Some(filename.to_owned());
+                Some(LoadSegment { addr, size, data, mode, file })
             } else {
                 None
             }
