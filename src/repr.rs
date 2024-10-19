@@ -13,7 +13,6 @@ pub struct LoadSegment {
     pub size: u64, // size in virtual memory
     pub data: Vec<u8>, // data to load at [addr..addr+size); can be smaller than size in virtual memory
     pub mode: LoadMode,
-    pub file: Option<String>, // which image file is it from; for debugging only
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
