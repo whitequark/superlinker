@@ -56,6 +56,8 @@ pub enum RelocationTarget {
     // R_X86_64_NONE
     None,
     // ... to be continued?
+
+    ElfSpecific(u32), // any that doesn't need and/or can't be portably processed
 }
 
 #[derive(Debug, Clone)]
@@ -111,7 +113,8 @@ impl Image {
                     *addend += offset as i64,
                 RelocationTarget::Symbol { .. } |
                 RelocationTarget::Copy { .. } |
-                RelocationTarget::None => ()
+                RelocationTarget::None |
+                RelocationTarget::ElfSpecific(_) => ()
             }
         }
         match self.interpreter {

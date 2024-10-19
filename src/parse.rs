@@ -102,7 +102,6 @@ pub fn parse_elf<E: EndianParse>(elf_data: &[u8], filename: &str, soname: Option
     }).unwrap_or(Vec::new());
     let parse_elf_rela = |elf_rela_data| {
         RelaIterator::new(elf_file.ehdr.endianness, elf_file.ehdr.class, elf_rela_data)
-            // .filter(|elf_rela| elf_rela.r_type != R_X86_64_COPY)
             .map(|elf_rela| {
                 let offset = elf_rela.r_offset;
                 let target = if elf_file.ehdr.e_machine == EM_X86_64 {
@@ -139,6 +138,10 @@ pub fn parse_elf<E: EndianParse>(elf_data: &[u8], filename: &str, soname: Option
                         RelocationTarget::Copy {
                             symbol: symbol.expect("R_X86_64_COPY requires a symbol"),
                         }
+                    } else if [R_X86_64_DTPMOD64].contains(&elf_rela.r_type) {
+                        assert!(elf_rela.r_sym == 0, "Generic relocation mechanism accepts no symbol");
+                        assert!(elf_rela.r_addend == 0, "Generic relocation mechanism accepts no addend");
+                        RelocationTarget::ElfSpecific(elf_rela.r_type)
                     } else {
                         panic!("Unhandled relocation type: {}", elf_rela.r_type)
                     }

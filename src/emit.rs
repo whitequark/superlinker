@@ -466,6 +466,11 @@ def init_debugging():
                     obj_relsym = 0;
                     obj_addend = 0;
                 }
+                RelocationTarget::ElfSpecific(reltype) => {
+                    obj_reltype = reltype;
+                    obj_relsym = 0;
+                    obj_addend = 0;
+                }
             }
         } else {
             unreachable!()
