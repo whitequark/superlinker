@@ -7,7 +7,7 @@ fn make_static_str(s: impl AsRef<str>) -> &'static str {
     s.as_ref().to_owned().leak()
 }
 
-fn make_stub(
+fn make_shim(
     machine: u16,
     base: u64,
     interp_base: u64,
@@ -26,7 +26,7 @@ fn make_stub(
     // mechanism. However, if we link the interpreter in, the kernel will instead point these parameters to our
     // combined executable. Luckily, AT_PH* already have the right values, so the only modifications needed are
     // to AT_BASE (which *must* point to the `\x7FELF` of the interpreter) and AT_ENTRY (which must point to
-    // the PIE entry point). Since we interpose this stub using the `e_entry` file header field, we must restore
+    // the PIE entry point). Since we interpose this shim using the `e_entry` file header field, we must restore
     // the original `e_entry` by modifying `AT_ENTRY`.
     if machine == EM_X86_64 {
         let i1 = interp_entry as i64 - (base as i64 + 30);
@@ -62,7 +62,7 @@ fn make_stub(
         code.resize(((code.len() - 1) | 0xff) + 1, 0); // pad to make it easier to edit in binja
         code
     } else {
-        panic!("Stub not implemented for machine: {:?}", machine)
+        panic!("Shim not implemented for machine: {:?}", machine)
     }
 }
 
@@ -70,7 +70,7 @@ pub fn emit_elf(image: &Image) -> object::write::Result<Vec<u8>> {
     #[derive(Debug)]
     enum InterpreterOut {
         Path { bytes: Vec<u8> },
-        Stub { base: u64, entry: u64, phdrs: usize, code_len: usize },
+        Shim { base: u64, entry: u64, phdrs: usize, code_len: usize },
         None,
     }
 
@@ -108,8 +108,8 @@ pub fn emit_elf(image: &Image) -> object::write::Result<Vec<u8>> {
             InterpreterOut::Path { bytes }
         }
         Interpreter::Internal { base, entry, segments: phdrs } => {
-            let code = make_stub(image.machine, 0, 0, 0, 0, 0); // can't resolve references yet
-            InterpreterOut::Stub { base, entry, phdrs, code_len: code.len() }
+            let code = make_shim(image.machine, 0, 0, 0, 0, 0); // can't resolve references yet
+            InterpreterOut::Shim { base, entry, phdrs, code_len: code.len() }
         },
         Interpreter::Absent =>
             InterpreterOut::None
@@ -124,13 +124,13 @@ pub fn emit_elf(image: &Image) -> object::write::Result<Vec<u8>> {
     let obj_phdr_offset = obj_writer.reserved_len();
     let interp_phdr_count = match &out_interp {
         InterpreterOut::Path { .. } => /* PT_INTERP */1,
-        InterpreterOut::Stub { .. } => /* PT_LOAD */1,
+        InterpreterOut::Shim { .. } => /* PT_LOAD */1,
         InterpreterOut::None => 0,
     };
     let phdr_count =
         /* PT_PHDR */1
-        + /* PT_INTERP or PT_LOAD for interpreter thunk */interp_phdr_count
         + /* PT_LOAD for ELF file and program headers */1
+        + /* PT_INTERP or PT_LOAD for interpreter thunk */interp_phdr_count
         + /* PT_LOAD for PT_DYNAMIC, etc */1
         + /* PT_DYNAMIC */1
         + /* PT_LOAD[..] */image.segments.len();
@@ -139,7 +139,7 @@ pub fn emit_elf(image: &Image) -> object::write::Result<Vec<u8>> {
         obj_writer.reserve(bytes.len(), 1)
     } else { 0 };
     let obj_headers_end = obj_writer.reserved_len();
-    let obj_stub_offset = if let InterpreterOut::Stub { code_len, .. } = out_interp {
+    let obj_shim_offset = if let InterpreterOut::Shim { code_len, .. } = out_interp {
         obj_writer.reserve(code_len, image.alignment as usize)
     } else { 0 };
 
@@ -191,6 +191,9 @@ pub fn emit_elf(image: &Image) -> object::write::Result<Vec<u8>> {
     obj_writer.reserve_hash_section_index();
     let _obj_reloc_dyn_section_index = obj_writer.reserve_section_index();
     let obj_reloc_dyn_section_name = obj_writer.add_section_name(if is_rela { b".rela.dyn" } else { b".rel.dyn" });
+    let obj_shim_section_index_name = if let InterpreterOut::Shim { .. } = out_interp {
+        Some((obj_writer.reserve_section_index(), obj_writer.add_section_name(b"shim")))
+    } else { None };
     let mut out_load_sections = Vec::new();
     for (segment_index, segment) in image.segments.iter().enumerate() {
         let mut make_section = |name, size, addr, load| {
@@ -230,7 +233,7 @@ pub fn emit_elf(image: &Image) -> object::write::Result<Vec<u8>> {
     // Write file and program headers.
     let entry = match &out_interp {
         InterpreterOut::Path { .. } => image_file_offset as u64 + image.entry,
-        InterpreterOut::Stub { .. } => obj_stub_offset as u64,
+        InterpreterOut::Shim { .. } => obj_shim_offset as u64,
         InterpreterOut::None => 0,
     };
     obj_writer.write_file_header(&FileHeader {
@@ -261,22 +264,22 @@ pub fn emit_elf(image: &Image) -> object::write::Result<Vec<u8>> {
     // and runs its entry point instead of the application's.
     write_program_header(PT_PHDR, PF_R,
         obj_phdr_offset, class.program_header_size() * phdr_count, class.align() as u64);
-    match &out_interp {
-        InterpreterOut::Path { bytes } =>
-            // Kernel uses PT_INTERP to find out which interpreter to load.
-            write_program_header(PT_INTERP, PF_R,
-                obj_interp_offset, bytes.len(), /*align=*/1),
-        InterpreterOut::Stub { code_len, .. } =>
-            // Stub uses kernel ABI to bootstrap the built-in interpreter.
-            write_program_header(PT_LOAD, PF_R | PF_X,
-                obj_stub_offset, *code_len, /*align=*/image.alignment),
-        InterpreterOut::None => ()
-    }
     // The ELF program headers must be loaded in order for the interpreter to be able to parse the file. Although
     // it is not required by the ABI to load the file headers, it's easier to do that anyway. (Most Linux binaries
     // do load them.)
     write_program_header(PT_LOAD, PF_R,
         0, obj_headers_end, image.alignment);
+    match &out_interp {
+        InterpreterOut::Path { bytes } =>
+            // Kernel uses PT_INTERP to find out which interpreter to load.
+            write_program_header(PT_INTERP, PF_R,
+                obj_interp_offset, bytes.len(), /*align=*/1),
+        InterpreterOut::Shim { code_len, .. } =>
+            // Shim uses kernel ABI to bootstrap the built-in interpreter.
+            write_program_header(PT_LOAD, PF_R | PF_X,
+                obj_shim_offset, *code_len, /*align=*/image.alignment),
+        InterpreterOut::None => ()
+    }
     // The ELF dynamic information must be loaded too, for the same reasons. The PT_DYNAMIC program header points
     // to the beginning of this information, which contains the dynamic table, and is followed by the entities
     // that are referenced by the table. These are mapped read-write since the interpreter modifies them in-place.
@@ -303,17 +306,17 @@ pub fn emit_elf(image: &Image) -> object::write::Result<Vec<u8>> {
             obj_writer.pad_until(obj_interp_offset);
             obj_writer.write(&bytes);
         }
-        InterpreterOut::Stub { base: interp_base, entry: interp_entry, phdrs: interp_phdrs, code_len } => {
-            let code = make_stub(
+        InterpreterOut::Shim { base: interp_base, entry: interp_entry, phdrs: interp_phdrs, code_len } => {
+            let code = make_shim(
                 image.machine,
-                obj_stub_offset as u64,
+                obj_shim_offset as u64,
                 image_file_offset as u64 + *interp_base,
                 *interp_phdrs,
                 image_file_offset as u64 + *interp_entry,
                 image_file_offset as u64 + image.entry
             );
             assert_eq!(code.len(), *code_len);
-            obj_writer.pad_until(obj_stub_offset);
+            obj_writer.pad_until(obj_shim_offset);
             obj_writer.write(&code);
         }
         InterpreterOut::None => (),
@@ -441,6 +444,22 @@ pub fn emit_elf(image: &Image) -> object::write::Result<Vec<u8>> {
         sh_addralign: class.rel_size(is_rela) as u64,
         sh_entsize: class.rel_size(is_rela) as u64,
     });
+    if let InterpreterOut::Shim { code_len, .. } = out_interp {
+        if let Some((_obj_shim_section_index, obj_shim_section_name)) = obj_shim_section_index_name {
+            obj_writer.write_section_header(&SectionHeader {
+                name: Some(obj_shim_section_name),
+                sh_type: SHT_PROGBITS,
+                sh_flags: SHF_ALLOC as u64,
+                sh_addr: obj_shim_offset as u64,
+                sh_offset: obj_shim_offset as u64,
+                sh_size: code_len as u64,
+                sh_link: 0,
+                sh_info: 0,
+                sh_addralign: class.align() as u64,
+                sh_entsize: class.align() as u64,
+            });
+        } else { unreachable!() }
+    }
     for out_load_section in out_load_sections {
         let sh_flags = match out_load_section.mode {
             LoadMode::ReadOnly => SHF_ALLOC,

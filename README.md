@@ -86,7 +86,6 @@ Although the core approach is sound, this implementation has flaws, most of whic
     - PLT optimizations at least could be added back with additional work.
 - Only the `global-dynamic` TLS model is supported.
 - Only "Rela" relocations are implemented and tested, though "Rel" relocations would be trivial to add.
-- The kernel ABI emulation stub is unpleasantly large and difficult to modify.
 - `DT_GNU_HASH` is not supported, and the number of `DT_HASH` buckets is randomly fixed at 4.
 - Although ASLR is supported (Superlinker only produces position independent executables), `PT_GNU_STACK` and `PT_GNU_RELRO` are not supported and stripped.
 - Exception handling currently isn't supported, and `PT_GNU_EH_FRAME` is stripped.
