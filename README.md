@@ -91,6 +91,7 @@ Although the core approach is sound, this implementation has flaws, most of whic
 - Exception handling currently isn't supported, and `PT_GNU_EH_FRAME` is stripped.
 - The handling of shared object naming and dependencies is not robust and currently relies on filesystem basename rather than `DT_SONAME`.
     - `DT_SONAME` should be used for both dependency resolution and as a manifest of contents of the produced objects.
+- `DT_INIT`, `DT_INIT_TABLE`, `DT_FINI`, and `DT_FINI_TABLE` are currently unsupported and stripped. (They're not used much.)
 - Objects are linked in exactly the order in which they are provided on the command line. Cycles are OK though.
 - Some of the internal book-keeping probably has O(n²) complexity.
 
@@ -98,7 +99,7 @@ The implementation is less than a thousand lines long, written with portability 
 
 ## Python?
 
-Although tedious, it is quite feasible to use Superlinker to build a fully self-contained Python distribution without source modifications or, in fact, touching source at all. First, link the combination of the Python executable, its dependencies, and essential modules. Using Alpine Linux 3.20 as the base distribution, run:
+Although tedious, it is possible to use Superlinker to build a fully self-contained Python distribution without source modifications or, in fact, touching source at all. First, link the combination of the Python executable, its dependencies, and essential modules. Using Alpine Linux 3.20 as the base distribution, run:
 
 ```
 # apk add python3
@@ -123,7 +124,7 @@ $ fastjar 0cvf py.zip -C /usr/lib/python3.12/ .
 
 Note the `0` (that's a zero) option for `fastjar`; Python loads compressed zip archives using its own `zipimport` standard library module, which means that it cannot be compressed when it is a part of a zip archive itself.
 
-Even though Python has all of these modules linked into it, it's currently unaware of that fact, and any attempt to import them will fail. This can be solved with just a little bit of Python code:
+Even though Python has all of these modules linked into it, it's currently unaware of that, and an attempt to import any of them will fail. This can be solved with a little bit of Python code:
 
 ```
 $ cat >sitecustomize.py <<END
@@ -173,7 +174,7 @@ Type "help", "copyright", "credits" or "license" for more information.
 
 ## Past?
 
-If you've enjoyed Superlinker, you might also enjoy [unfork][].
+If you like Superlinker, you might also enjoy [unfork][].
 
 [unfork]: https://github.com/whitequark/unfork
 
