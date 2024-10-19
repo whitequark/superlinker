@@ -6,3 +6,6 @@ edition = "2021"
 [dependencies]
 elf = "0.7.4"
 object = { version = "0.36.5", default-features = false, features = ["elf", "write_std"] }
+
+[build-dependencies]
+elf = "0.7.4"
