@@ -127,12 +127,14 @@ pub fn emit_elf(image: &Image) -> object::write::Result<Vec<u8>> {
         InterpreterOut::Shim { .. } => /* PT_LOAD */1,
         InterpreterOut::None => 0,
     };
+    let tls_phdr_count = if image.tls_image.is_some() { 1 } else { 0 };
     let phdr_count =
         /* PT_PHDR */1
         + /* PT_LOAD for ELF file and program headers */1
         + /* PT_INTERP or PT_LOAD for interpreter thunk */interp_phdr_count
-        + /* PT_LOAD for PT_DYNAMIC, etc */1
         + /* PT_DYNAMIC */1
+        + /* PT_TLS if needed */tls_phdr_count
+        + /* PT_LOAD for PT_DYNAMIC, PT_TLS, etc */1
         + /* PT_LOAD[..] */image.segments.len();
     obj_writer.reserve_program_headers(phdr_count as u32);
     let obj_interp_offset = if let InterpreterOut::Path { bytes } = &out_interp {
@@ -178,6 +180,9 @@ pub fn emit_elf(image: &Image) -> object::write::Result<Vec<u8>> {
     let hash_chain_count = hash_index_base + out_dynsyms.len() as u32;
     let obj_hash_offset = obj_writer.reserve_hash(hash_bucket_count, hash_chain_count);
     let obj_reloc_offset = obj_writer.reserve_relocations(image.relocations.len(), is_rela);
+    let obj_tls_offset = if let Some(ref tls_data) = image.tls_image {
+        obj_writer.reserve(tls_data.len(), class.align() as usize)
+    } else { 0 };
     let obj_dynamic_end = obj_writer.reserved_len();
 
     // Reserve space for section headers.
@@ -285,6 +290,12 @@ pub fn emit_elf(image: &Image) -> object::write::Result<Vec<u8>> {
     // that are referenced by the table. These are mapped read-write since the interpreter modifies them in-place.
     write_program_header(PT_DYNAMIC, PF_R | PF_W,
         obj_dynamic_offset, class.dyn_size() * dynamic_count, class.align() as u64);
+    if let Some(ref tls_data) = image.tls_image {
+        // The TLS section piggybacks on the PT_DYNAMIC's PT_LOAD. This isn't how it's usually done but it should be
+        // fine, for now at least.
+        write_program_header(PT_TLS, PF_R,
+            obj_tls_offset, tls_data.len(), class.align() as u64);
+    }
     write_program_header(PT_LOAD, PF_R | PF_W,
         obj_dynamic_offset, obj_dynamic_end - obj_dynamic_offset, class.align() as u64);
     // The image segments are loaded as-is. In the segments, `segment.size` could be bigger than `segment.data`, with
@@ -427,6 +438,9 @@ pub fn emit_elf(image: &Image) -> object::write::Result<Vec<u8>> {
             r_type: obj_reltype,
             r_addend: obj_addend,
         });
+    }
+    if let Some(ref tls_data) = image.tls_image {
+        obj_writer.write(&tls_data);
     }
 
     // Write section headers.

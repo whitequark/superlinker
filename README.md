@@ -1,6 +1,6 @@
 # ｓｕｐｅｒｌｉｎｋｅｒ
 
-Superlinker is a tool that can combine executables and shared libraries into even larger products, just like object files are combined into executables and shared libraries.
+Superlinker is a tool that can combine executables and shared libraries into even larger products, just like object files are combined into executables and shared libraries. It works well enough for [building a self-contained Python distribution](#python) from off-the-shelf packages.
 
 ## Why?
 
@@ -95,6 +95,81 @@ Although the core approach is sound, this implementation has flaws, most of whic
 - Some of the internal book-keeping probably has O(n²) complexity.
 
 The implementation is less than a thousand lines long, written with portability in mind, and extensively commented, so it should not be too difficult to address most of these flaws. It should even run on Windows!
+
+## Python?
+
+Although tedious, it is quite feasible to use Superlinker to build a fully self-contained Python distribution without source modifications or, in fact, touching source at all. First, link the combination of the Python executable, its dependencies, and essential modules. Using Alpine Linux 3.20 as the base distribution, run:
+
+```
+# apk add python3
+$ ./superlinker py.elf /usr/bin/python3.12 /usr/lib/libpython3.12.so.1.0 \
+    /usr/lib/python3.12/lib-dynload/math.cpython-312-x86_64-linux-musl.so \
+    /usr/lib/python3.12/lib-dynload/binascii.cpython-312-x86_64-linux-musl.so \
+    /usr/lib/python3.12/lib-dynload/zlib.cpython-312-x86_64-linux-musl.so \
+    /usr/lib/python3.12/lib-dynload/array.cpython-312-x86_64-linux-musl.so \
+    /usr/lib/python3.12/lib-dynload/_struct.cpython-312-x86_64-linux-musl.so \
+    /usr/lib/python3.12/lib-dynload/_ctypes.cpython-312-x86_64-linux-musl.so \
+    /usr/lib/python3.12/lib-dynload/readline.cpython-312-x86_64-linux-musl.so \
+    /usr/lib/libreadline.so.8 /usr/lib/libncursesw.so.6 /usr/lib/libffi.so.8 \
+    /lib/libz.so.1 /lib/ld-musl-x86_64.so.1
+```
+
+Python has a little known function where it can [treat a zip archive as if it was a directory][zipimport], which will come in handy when packaging the (portable subset of) standard library modules:
+
+```
+# apk add fastjar
+$ fastjar 0cvf py.zip -C /usr/lib/python3.12/ .
+```
+
+Note the `0` (that's a zero) option for `fastjar`; Python loads compressed zip archives using its own `zipimport` standard library module, which means that it cannot be compressed when it is a part of a zip archive itself.
+
+Even though Python has all of these modules linked into it, it's currently unaware of that fact, and any attempt to import them will fail. This can be solved with just a little bit of Python code:
+
+```
+$ cat >sitecustomize.py <<END
+import sys, importlib.machinery, importlib.util
+
+class SoulSearchingMetaPathFinder:
+    @staticmethod
+    def find_spec(name, path, target=None):
+        if path is None:
+            spec = importlib.util.spec_from_loader(name,
+                importlib.machinery.ExtensionFileLoader(name, sys.executable))
+            try:
+                spec.loader.create_module(spec)
+                return spec
+            except ImportError:
+                return None
+
+sys.meta_path.append(SoulSearchingMetaPathFinder)
+END
+$ fastjar 0uvf py.zip sitecustomize.py
+```
+
+The Python executable and the Python standard library are now ready to spend an eternity together:
+
+```
+$ cat py.elf py.zip >py.run
+$ chmod +x py.run
+```
+
+The final touch this distribution needs is the `PYTHONPATH` environment variable:
+
+```
+$ PYTHONPATH=$(pwd)/py.run ./py.run
+Could not find platform independent libraries <prefix>
+Could not find platform dependent libraries <exec_prefix>
+Python 3.12.7 (main, Oct  7 2024, 11:30:19) [GCC 13.2.1 20240309] on linux
+Type "help", "copyright", "credits" or "license" for more information.
+>>> import sys, zipfile
+>>> print([zi.filename for zi in zipfile.ZipFile(sys.executable).filelist][:10])
+['META-INF/', 'META-INF/MANIFEST.MF', './', '_collections_abc.py', 'socket.py', '__pycache__/', '__pycache__/heapq.cpython-312.pyc', '__pycache__/codecs.cpython-312.pyc', '__pycache__/shutil.cpython-312.pyc', '__pycache__/ssl.cpython-312.pyc']
+>>> import zlib
+>>> zlib.crc32(b"spam")
+1138425661
+```
+
+[zipimport]: https://docs.python.org/3/library/zipimport.html
 
 ## Past?
 

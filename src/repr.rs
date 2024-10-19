@@ -77,6 +77,7 @@ pub struct Image {
     pub machine: u16, // ELF machine
     pub alignment: u64, // integer that is a power of 2
     pub segments: Vec<LoadSegment>, // sorted in ascending order
+    pub tls_image: Option<Vec<u8>>,
     pub symbols: Vec<Symbol>,
     pub relocations: Vec<Relocation>,
     pub dependencies: Vec<String>, // requests images by name
@@ -139,6 +140,13 @@ impl Image {
         self.rebase(target_end);
         // Merge this image's segments.
         target.segments.append(&mut self.segments);
+        if self.tls_image.is_some() {
+            if target.tls_image.is_none() {
+                target.tls_image = self.tls_image.take();
+            } else {
+                panic!("Merging TLS images is not implemented");
+            }
+        }
         match (&self.interpreter, &mut target.interpreter) {
             (Interpreter::Absent, Interpreter::Absent) |
             (Interpreter::Absent, Interpreter::External(..)) => {

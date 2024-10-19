@@ -47,6 +47,20 @@ pub fn parse_elf<E: EndianParse>(elf_data: &[u8], soname: Option<&str>) -> Resul
 
         })
         .collect::<Vec<_>>();
+    let tls_image = elf_segments
+        .iter()
+        .find_map(|elf_segment| {
+            if elf_segment.p_type == PT_TLS {
+                let mut tls_image = vec![0; elf_segment.p_memsz as usize];
+                let data = elf_file.segment_data(&elf_segment)
+                    .expect("No data for PT_TLS")
+                    .to_owned();
+                tls_image[..data.len()].copy_from_slice(&data[..]);
+                Some(tls_image)
+            } else {
+                None
+            }
+        });
     let elf_dynsyms = elf_common.dynsyms.as_ref().expect("No dynamic symbol table");
     let elf_dynsyms_strs = elf_common.dynsyms_strs.as_ref().expect("No dynamic symbol string table");
     let symbols = elf_dynsyms
@@ -91,6 +105,8 @@ pub fn parse_elf<E: EndianParse>(elf_data: &[u8], soname: Option<&str>) -> Resul
                 }
                 let size = elf_symbol.st_size;
                 Some(Symbol { name, kind, scope, value, size, abs: (elf_symbol.st_shndx == SHN_ABS) })
+            } else if elf_symtype == STT_TLS {
+                panic!("Unhangled STT_TLS symbol");
             } else {
                 None
             }
@@ -302,6 +318,7 @@ pub fn parse_elf<E: EndianParse>(elf_data: &[u8], soname: Option<&str>) -> Resul
         machine,
         alignment,
         segments,
+        tls_image,
         symbols,
         relocations,
         dependencies,
