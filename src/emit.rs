@@ -28,42 +28,31 @@ fn make_shim(
     // to AT_BASE (which *must* point to the `\x7FELF` of the interpreter) and AT_ENTRY (which must point to
     // the PIE entry point). Since we interpose this shim using the `e_entry` file header field, we must restore
     // the original `e_entry` by modifying `AT_ENTRY`.
-    if machine == EM_X86_64 {
-        let i1 = interp_entry as i64 - (base as i64 + 30);
-        let i2 =  interp_base as i64 - (base as i64 + 43);
-        let i3 =   user_entry as i64 - (base as i64 + 60);
-        let i4 = interp_phdrs as u8;
-        let mut code = vec![
-            0x48, 0x8b, 0x3c, 0x24,
-            0x48, 0x8d, 0x7c, 0xfc, 0x10,
+    //
+    // The shim consists of a code part (blob built from assembly source) and data part (built here). The code part
+    // must be completely position independent (no relocations) and padding to align the data part must be included
+    // in the blob. The code part reads the data part using pc-relative addresses.
 
-            0x48, 0x83, 0x3f, 0x00,
-            0x48, 0x8d, 0x7f, 0x08,
-            0x75, 0xf6,
-
-            0x48, 0x83, 0x3f, 0x00,
-            0x75, 0x05,
-            0xe9, (i1&0xff) as u8, (i1>>8) as u8, (i1>>16) as u8, (i1>>24) as u8,
-
-            0x48, 0x83, 0x3f, 0x07, 0x75, 0x0b, // AT_BASE  = 0x7
-            0x48, 0x8d, 0x35, (i2&0xff) as u8, (i2>>8) as u8, (i2>>16) as u8, (i2>>24) as u8,
-            0x48, 0x89, 0x77, 0x08,
-
-            0x48, 0x83, 0x3f, 0x09, 0x75, 0x0b, // AT_ENTRY = 0x9
-            0x48, 0x8d, 0x35, (i3&0xff) as u8, (i3>>8) as u8, (i3>>16) as u8, (i3>>24) as u8,
-            0x48, 0x89, 0x77, 0x08,
-
-            0x48, 0x83, 0x3f, 0x05, 0x75, 0x05, // AT_PHNUM = 0x5
-            0x48, 0x83, 0x6f, 0x08, i4,
-
-            0x48, 0x83, 0xc7, 0x10,
-            0xeb, 0xc2,
-        ];
-        code.resize(((code.len() - 1) | 0xff) + 1, 0); // pad to make it easier to edit in binja
-        code
+    let code = if machine == EM_X86_64 {
+        include_bytes!("shim/x86_64.bin").to_vec()
     } else {
         panic!("Shim not implemented for machine: {:?}", machine)
-    }
+    };
+
+    let mut code = code.to_vec();
+
+    // Append data part of shim
+
+    // Keep in sync with src/shim/common.h
+    // TODO: Handle 32-bit stuff
+    code.extend(user_entry.wrapping_sub(base).to_le_bytes());
+    code.extend(interp_entry.wrapping_sub(base).to_le_bytes());
+    code.extend(interp_base.wrapping_sub(base).to_le_bytes());
+    code.extend((interp_phdrs as u64).to_le_bytes());
+
+    code.resize(((code.len() - 1) | 0xff) + 1, 0); // pad to make it easier to edit in binja
+    code
+
 }
 
 pub fn emit_elf(image: &Image) -> object::write::Result<Vec<u8>> {
