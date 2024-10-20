@@ -194,6 +194,24 @@ impl Image {
                 }
                 (_source_symbol @ Symbol { scope: SymbolScope::Weak, value: 0, .. },
                  Some(_target_symbol @ &mut Symbol { scope: SymbolScope::Weak, value: 0, .. })) => (),
+                (_source_symbol @ Symbol { scope: SymbolScope::Weak, value: 0, .. },
+                 Some(_target_symbol @ &mut Symbol { scope: SymbolScope::Weak, .. })) => {
+                    eprintln!("merge_into: replacing source weak symbol {:?} with target weak symbol", &symbol_name);
+                }
+                (source_symbol @ Symbol { scope: SymbolScope::Weak, .. },
+                 Some(target_symbol @ &mut Symbol { scope: SymbolScope::Weak, value: 0, .. })) => {
+                    eprintln!("merge_into: using source weak symbol {:?} to resolve target missing weak symbol", &symbol_name);
+                    target_symbol.scope = source_symbol.scope;
+                    target_symbol.kind = source_symbol.kind;
+                    target_symbol.value = source_symbol.value;
+                }
+                (source_symbol @ Symbol { scope: SymbolScope::Weak, .. },
+                 Some(target_symbol @ &mut Symbol { scope: SymbolScope::Weak, .. })) => {
+                    eprintln!("merge_into: using source weak symbol {:?} to resolve target missing weak symbol", &symbol_name);
+                    target_symbol.scope = source_symbol.scope;
+                    target_symbol.kind = source_symbol.kind;
+                    target_symbol.value = source_symbol.value;
+                }
                 (source_symbol @ Symbol { scope: SymbolScope::Global | SymbolScope::Weak, .. },
                  Some(target_symbol @ &mut Symbol { scope: SymbolScope::Import, .. })) => {
                     eprintln!("merge_into: using source symbol {:?} to resolve target import", &symbol_name);
