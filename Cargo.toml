@@ -1,6 +1,6 @@
 [package]
 name = "superlinker"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 
 [dependencies]
@@ -9,3 +9,6 @@ object = { version = "0.36.5", default-features = false, features = ["elf", "wri
 
 [build-dependencies]
 elf = "0.7.4"
+
+[profile.release]
+lto = true
