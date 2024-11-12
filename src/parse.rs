@@ -342,8 +342,19 @@ pub fn parse_elf<E: EndianParse>(elf_data: &[u8], soname: Option<&str>) -> Resul
         _ => panic!("Expected dynamic table to have both or neither of DT_FINI_ARRAY and DT_FINI_ARRAYSZ")
     }
     if let Some(init_func) = elf_dynamic_fini { finalizers.push(init_func as u64) }
-    // TODO: DT_SONAME(s) must take priority
-    let image_name = soname.map(|name| name.to_owned());
+    let mut image_names = elf_dynamic.iter().filter_map(|elf_dyn| {
+        if elf_dyn.d_tag == DT_SONAME {
+            Some(elf_dynsyms_strs
+                .get(elf_dyn.clone().d_val() as usize)
+                .expect("Invalid DT_SONAME name")
+                .to_owned())
+        } else {
+            None
+        }
+    }).collect::<Vec<_>>();
+    if image_names.is_empty() { // DT_SONAMEs take priority
+        if let Some(name) = soname { image_names.push(name.to_owned()) };
+    }
     let interpreter = elf_segments.iter().find_map(|elf_segment| {
         // If PT_INTERP exists, it specifies a path to the external interpreter.
         if elf_segment.p_type == PT_INTERP {
@@ -393,7 +404,7 @@ pub fn parse_elf<E: EndianParse>(elf_data: &[u8], soname: Option<&str>) -> Resul
         initializers,
         finalizers,
         dependencies,
-        image_name,
+        image_names,
         interpreter,
         entry,
     })

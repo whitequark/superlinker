@@ -89,9 +89,6 @@ Although the core approach is sound, this implementation has flaws, most of whic
 - `DT_GNU_HASH` is not supported, and the number of `DT_HASH` buckets is randomly fixed at 4.
 - Although ASLR is supported (Superlinker only produces position independent executables), `PT_GNU_STACK` and `PT_GNU_RELRO` are not supported and stripped.
 - Exception handling currently isn't supported, and `PT_GNU_EH_FRAME` is stripped.
-- The handling of shared object naming and dependencies is not robust and currently relies on filesystem basename rather than `DT_SONAME`.
-    - `DT_SONAME` should be used for both dependency resolution and as a manifest of contents of the produced objects.
-- Objects are linked in exactly the order in which they are provided on the command line. Cycles are OK though.
 - Some of the internal book-keeping probably has O(n²) complexity.
 
 The implementation is less than a thousand lines long, written with portability in mind, and extensively commented, so it should not be too difficult to address most of these flaws. It should even run on Windows!

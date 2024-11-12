@@ -83,12 +83,16 @@ pub struct Image {
     pub initializers: Vec<u64>,
     pub finalizers: Vec<u64>,
     pub dependencies: Vec<String>, // requests images by name
-    pub image_name: Option<String>, // requested via dependencies
+    pub image_names: Vec<String>, // requested via dependencies
     pub interpreter: Interpreter,
     pub entry: u64,
 }
 
 impl Image {
+    pub fn display_image_name(&self) -> &str {
+        self.image_names.first().map(|name| &name[..]).unwrap_or("<unnamed>")
+    }
+
     pub fn segment_bounds(&self) -> (u64, u64) {
         match (self.segments.first(), self.segments.last()) {
             (Some(first), Some(last)) =>
@@ -140,8 +144,7 @@ impl Image {
         assert!(self.machine == target.machine);
         assert!(self.alignment == target.alignment);
         eprintln!("merge_into: merging source image {} into target image {}",
-            self.image_name.as_deref().map(|name| format!("{:?}", name)).unwrap_or("<unnamed>".to_owned()),
-            target.image_name.as_deref().map(|name| format!("{:?}", name)).unwrap_or("<unnamed>".to_owned()));
+            self.display_image_name(), target.display_image_name());
         // Relocate this image to be fully above the target.
         let (_target_begin, target_end) = target.segment_bounds();
         eprintln!("merge_into: rebasing source image by +{:#x}", target_end);
@@ -236,7 +239,7 @@ impl Image {
                 },
                 (source_symbol, Some(target_symbol @ &mut Symbol { .. }))
                         if symbol_name == "_init" || symbol_name == "_fini" => {
-                    if self.image_name.as_deref() == Some("libc.so") {
+                    if self.image_names.iter().find(|name| **name == "libc.so").is_some() {
                         eprintln!("merge_into: forcing target special symbol {:?} to come from libc", &symbol_name);
                         target_symbol.scope = SymbolScope::Global;
                         target_symbol.kind = source_symbol.kind;
@@ -308,16 +311,18 @@ impl Image {
             target_dependency_set.insert(target_dependency.clone());
         }
         for source_dependency in self.dependencies.into_iter() {
-            if Some(&source_dependency) == target.image_name.as_ref() { continue }
+            if target.image_names.iter().find(|&image_name| *image_name == source_dependency).is_some() { continue }
             if target_dependency_set.insert(source_dependency.clone()) {
                 eprintln!("merge_into: adding new dependency {:?}", source_dependency);
             }
         }
-        if let Some(source_image_name) = self.image_name.as_ref() {
+        for source_image_name in self.image_names.iter() {
             if target_dependency_set.remove(source_image_name) {
                 eprintln!("merge_into: removing extinguished dependency {:?}", &source_image_name);
             }
         }
         target.dependencies = target_dependency_set.into_iter().collect::<Vec<_>>();
+        // Merge image names.
+        target.image_names.append(&mut self.image_names);
     }
 }
