@@ -1,13 +1,30 @@
 use elf::abi::*;
 use elf::endian::EndianParse;
 use elf::relocation::RelaIterator;
-use elf::segment::ProgramHeader;
 use elf::ElfBytes;
 
 use crate::repr::*;
 
 pub const DT_RELR: i64 = 36;
 pub const DT_RELRSZ: i64 = 35;
+
+fn elf_vaddr_to_offset<E: EndianParse>(elf_data: &[u8], addr: u64) -> Result<usize, ()> {
+    let elf_file = ElfBytes::<E>::minimal_parse(elf_data).expect("Cannot parse");
+    let elf_segments = elf_file.segments().expect("No segments");
+    elf_segments
+        .iter()
+        .find(|segment| addr >= segment.p_vaddr && addr <= segment.p_vaddr + segment.p_memsz)
+        .map(|segment| (addr + segment.p_offset - segment.p_vaddr) as usize)
+        .ok_or(())
+}
+
+fn elf_vaddr_size_to_offset_range<E: EndianParse>(elf_data: &[u8], addr: u64, size: u64)
+        -> Result<std::ops::Range<usize>, ()> {
+    match (elf_vaddr_to_offset::<E>(elf_data, addr), elf_vaddr_to_offset::<E>(elf_data, addr + size)) {
+        (Ok(offset_start), Ok(offset_end)) => Ok(offset_start..offset_end),
+        _ => Err(())
+    }
+}
 
 pub fn parse_elf<E: EndianParse>(elf_data: &[u8], soname: Option<&str>) -> Result<Image, elf::parse::ParseError> {
     let elf_file = ElfBytes::<E>::minimal_parse(elf_data)?;
@@ -170,38 +187,43 @@ pub fn parse_elf<E: EndianParse>(elf_data: &[u8], soname: Option<&str>) -> Resul
             .collect::<Vec<_>>()
     };
     let elf_dynamic_rela = elf_dynamic.iter().find_map(|elf_dyn| {
-        if elf_dyn.d_tag == DT_RELA { Some(elf_dyn.clone().d_val() as usize) } else { None }
+        if elf_dyn.d_tag == DT_RELA { Some(elf_dyn.clone().d_val()) } else { None }
     });
     let elf_dynamic_relasz = elf_dynamic.iter().find_map(|elf_dyn| {
-        if elf_dyn.d_tag == DT_RELASZ { Some(elf_dyn.clone().d_val() as usize) } else { None }
+        if elf_dyn.d_tag == DT_RELASZ { Some(elf_dyn.clone().d_val()) } else { None }
     });
     let elf_dynamic_pltrel = elf_dynamic.iter().find_map(|elf_dyn| {
         if elf_dyn.d_tag == DT_PLTREL { Some(elf_dyn.clone().d_val() as i64) } else { None }
     });
     let elf_dynamic_jmprel = elf_dynamic.iter().find_map(|elf_dyn| {
-        if elf_dyn.d_tag == DT_JMPREL { Some(elf_dyn.clone().d_val() as usize) } else { None }
+        if elf_dyn.d_tag == DT_JMPREL { Some(elf_dyn.clone().d_val()) } else { None }
     });
     let elf_dynamic_pltrelsz = elf_dynamic.iter().find_map(|elf_dyn| {
-        if elf_dyn.d_tag == DT_PLTRELSZ { Some(elf_dyn.clone().d_val() as usize) } else { None }
+        if elf_dyn.d_tag == DT_PLTRELSZ { Some(elf_dyn.clone().d_val()) } else { None }
     });
     let elf_dynamic_relr = elf_dynamic.iter().find_map(|elf_dyn| {
-        if elf_dyn.d_tag == DT_RELR { Some(elf_dyn.clone().d_val() as usize) } else { None }
+        if elf_dyn.d_tag == DT_RELR { Some(elf_dyn.clone().d_val()) } else { None }
     });
     let elf_dynamic_relrsz = elf_dynamic.iter().find_map(|elf_dyn| {
-        if elf_dyn.d_tag == DT_RELRSZ { Some(elf_dyn.clone().d_val() as usize) } else { None }
+        if elf_dyn.d_tag == DT_RELRSZ { Some(elf_dyn.clone().d_val()) } else { None }
     });
     let mut data_relocations = match (elf_dynamic_rela, elf_dynamic_relasz) {
-        (Some(elf_dynamic_rela), Some(elf_dynamic_relasz)) =>
-            parse_elf_rela(&elf_data[elf_dynamic_rela..elf_dynamic_rela + elf_dynamic_relasz]),
+        (Some(elf_dynamic_rela), Some(elf_dynamic_relasz)) => {
+            let rela_range =
+                elf_vaddr_size_to_offset_range::<E>(elf_data, elf_dynamic_rela, elf_dynamic_relasz)
+                .expect("Rela data out of bounds");
+            parse_elf_rela(&elf_data[rela_range])
+        }
         (None, None) => Vec::new(),
         _ => panic!("Expected dynamic table to have both or neither of PT_RELA and PT_RELASZ")
     };
     let mut code_relocations = match (elf_dynamic_pltrel, elf_dynamic_jmprel, elf_dynamic_pltrelsz) {
-        (Some(elf_dynamic_pltrel), Some(elf_dynamic_jmprel), Some(elf_dynamic_pltrelsz))
-                if elf_dynamic_pltrel == DT_RELA => {
-            let elf_jmprel_data = &elf_data[elf_dynamic_jmprel..elf_dynamic_jmprel + elf_dynamic_pltrelsz];
+        (Some(elf_dynamic_pltrel), Some(elf_dynamic_jmprel), Some(elf_dynamic_pltrelsz)) => {
+            let jmprel_range =
+                elf_vaddr_size_to_offset_range::<E>(elf_data, elf_dynamic_jmprel, elf_dynamic_pltrelsz)
+                .expect("Jmprel data out of bounds");
             if elf_dynamic_pltrel == DT_RELA {
-                parse_elf_rela(elf_jmprel_data)
+                parse_elf_rela(&elf_data[jmprel_range])
             // } else if elf_dynamic_pltrel == DT_REL {
             //     parse_elf_rel(elf_pltrel_data)
             } else {
@@ -216,18 +238,14 @@ pub fn parse_elf<E: EndianParse>(elf_data: &[u8], soname: Option<&str>) -> Resul
     let mut relr_relocations = Vec::new();
     match (elf_dynamic_relr, elf_dynamic_relrsz) {
         (Some(elf_dynamic_relr), Some(elf_dynamic_relrsz)) => {
+            let relr_range =
+                elf_vaddr_size_to_offset_range::<E>(elf_data, elf_dynamic_relr, elf_dynamic_relrsz)
+                .expect("Relr data out of bounds");
+            let elf_relr_data = &elf_data[relr_range];
             let parse = E::from_ei_data(elf_data[EI_DATA]).unwrap();
-            let mut segment_for_addend = None::<ProgramHeader>;
-            let mut get_addend = |addr| {
-                segment_for_addend = match segment_for_addend {
-                    Some(segment) if addr >= segment.p_vaddr && addr < segment.p_vaddr + segment.p_memsz =>
-                        segment_for_addend,
-                    _ => elf_segments.iter().find(|segment|
-                        addr >= segment.p_vaddr && addr < segment.p_vaddr + segment.p_memsz)
-                };
-                let mut file_offset = segment_for_addend
-                    .map(|segment| addr + segment.p_offset - segment.p_vaddr)
-                    .expect("Relr target outside of all segments") as usize;
+            let get_addend = |addr| {
+                let mut file_offset = elf_vaddr_to_offset::<E>(elf_data, addr)
+                    .expect("Relr target out of bounds");
                 parse.parse_i64_at(&mut file_offset, elf_data).unwrap()
             };
             let mut push_relr = |addr|
@@ -235,7 +253,6 @@ pub fn parse_elf<E: EndianParse>(elf_data: &[u8], soname: Option<&str>) -> Resul
                     offset: addr,
                     target: RelocationTarget::Base { addend: get_addend(addr) }
                 });
-            let elf_relr_data = &elf_data[elf_dynamic_relr..elf_dynamic_relr + elf_dynamic_relrsz];
             let mut offset = 0;
             let mut next_rel = 0;
             while offset < elf_relr_data.len() {
@@ -277,38 +294,31 @@ pub fn parse_elf<E: EndianParse>(elf_data: &[u8], soname: Option<&str>) -> Resul
         if elf_dyn.d_tag == DT_INIT { Some(elf_dyn.clone().d_val() as usize) } else { None }
     });
     let elf_dynamic_init_array = elf_dynamic.iter().find_map(|elf_dyn| {
-        if elf_dyn.d_tag == DT_INIT_ARRAY { Some(elf_dyn.clone().d_val() as usize) } else { None }
+        if elf_dyn.d_tag == DT_INIT_ARRAY { Some(elf_dyn.clone().d_val()) } else { None }
     });
     let elf_dynamic_init_arraysz = elf_dynamic.iter().find_map(|elf_dyn| {
-        if elf_dyn.d_tag == DT_INIT_ARRAYSZ { Some(elf_dyn.clone().d_val() as usize) } else { None }
+        if elf_dyn.d_tag == DT_INIT_ARRAYSZ { Some(elf_dyn.clone().d_val()) } else { None }
     });
     let elf_dynamic_fini = elf_dynamic.iter().find_map(|elf_dyn| {
         if elf_dyn.d_tag == DT_FINI { Some(elf_dyn.clone().d_val() as usize) } else { None }
     });
     let elf_dynamic_fini_array = elf_dynamic.iter().find_map(|elf_dyn| {
-        if elf_dyn.d_tag == DT_FINI_ARRAY { Some(elf_dyn.clone().d_val() as usize) } else { None }
+        if elf_dyn.d_tag == DT_FINI_ARRAY { Some(elf_dyn.clone().d_val()) } else { None }
     });
     let elf_dynamic_fini_arraysz = elf_dynamic.iter().find_map(|elf_dyn| {
-        if elf_dyn.d_tag == DT_FINI_ARRAYSZ { Some(elf_dyn.clone().d_val() as usize) } else { None }
-    });
-    let addend_to_unmap_at = |address| elf_segments.iter().find_map(|elf_segment| {
-        if (address as u64) >= elf_segment.p_vaddr &&
-                (address as u64) < elf_segment.p_vaddr + elf_segment.p_memsz {
-            Some(elf_segment.p_offset as isize - elf_segment.p_vaddr as isize)
-        } else {
-            None
-        }
+        if elf_dyn.d_tag == DT_FINI_ARRAYSZ { Some(elf_dyn.clone().d_val()) } else { None }
     });
     let mut initializers = Vec::new();
     if let Some(init_func) = elf_dynamic_init { initializers.push(init_func as u64) }
     match (elf_dynamic_init_array, elf_dynamic_init_arraysz) {
         (Some(init_func_array), Some(init_func_array_sz)) => {
-            let init_func_array = init_func_array.wrapping_add_signed(addend_to_unmap_at(init_func_array)
-                .expect("DT_INIT_ARRAY not part of any segment"));
+            let init_func_range =
+                elf_vaddr_size_to_offset_range::<E>(elf_data, init_func_array, init_func_array_sz)
+                .expect("Init array data out of bounds");
+            let elf_init_funcs = &elf_data[init_func_range];
             let parse = E::from_ei_data(elf_data[EI_DATA]).unwrap();
-            let elf_init_funcs = &elf_data[init_func_array..init_func_array + init_func_array_sz];
             let mut offset = 0;
-            while offset < init_func_array_sz {
+            while offset < elf_init_funcs.len() {
                 initializers.push(parse.parse_u64_at(&mut offset, elf_init_funcs).unwrap())
             }
         }
@@ -318,12 +328,13 @@ pub fn parse_elf<E: EndianParse>(elf_data: &[u8], soname: Option<&str>) -> Resul
     let mut finalizers = Vec::new();
     match (elf_dynamic_fini_array, elf_dynamic_fini_arraysz) {
         (Some(fini_func_array), Some(fini_func_array_sz)) => {
-            let fini_func_array = fini_func_array.wrapping_add_signed(addend_to_unmap_at(fini_func_array)
-                .expect("DT_FINI_ARRAY not part of any segment"));
+            let fini_func_range =
+                elf_vaddr_size_to_offset_range::<E>(elf_data, fini_func_array, fini_func_array_sz)
+                .expect("Fini array data out of bounds");
+            let elf_fini_funcs = &elf_data[fini_func_range];
             let parse = E::from_ei_data(elf_data[EI_DATA]).unwrap();
-            let elf_fini_funcs = &elf_data[fini_func_array..fini_func_array + fini_func_array_sz];
             let mut offset = 0;
-            while offset < fini_func_array_sz {
+            while offset < elf_fini_funcs.len() {
                 finalizers.push(parse.parse_u64_at(&mut offset, elf_fini_funcs).unwrap())
             }
         }
